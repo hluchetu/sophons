@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+.pytest_cache/
+
+# Local design notes
+docs/agents_architecture.md
+docs/evals_architecture.md
+docs/guardrails_architecture.md
+docs/integrations_architecture.md
+docs/llm_architecture.md
+docs/loaders_architecture.md
+docs/memory_architecture.md
+docs/observability_architecture.md
+docs/rag_architecture.md
+docs/retrievers_architecture.md
+docs/roadmap_next_3.md
+docs/splitters_architecture.md
+docs/storage_architecture.md
+docs/tools_architecture.md
