@@ -5,7 +5,7 @@ import logging
 import random
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 logger = logging.getLogger(__name__)
 
@@ -130,10 +130,7 @@ def any_of(*policies: RetryPolicy) -> RetryPolicy:
 
     async def policy(context: RetryContext) -> bool | RetryDecision:
         for p in policies:
-            result = p(context)
-            if asyncio.iscoroutine(result):
-                result = await result
-            decision = _coerce(result)
+            decision = await _evaluate(p, context)
             if decision.retry:
                 return decision
         return RetryDecision(retry=False)
@@ -147,10 +144,7 @@ def all_of(*policies: RetryPolicy) -> RetryPolicy:
     async def policy(context: RetryContext) -> bool | RetryDecision:
         last: RetryDecision = RetryDecision(retry=True)
         for p in policies:
-            result = p(context)
-            if asyncio.iscoroutine(result):
-                result = await result
-            decision = _coerce(result)
+            decision = await _evaluate(p, context)
             if not decision.retry:
                 return decision
             last = decision
@@ -340,7 +334,9 @@ def _coerce(value: bool | RetryDecision) -> RetryDecision:
 
 
 async def _evaluate(policy: RetryPolicy, context: RetryContext) -> RetryDecision:
-    result = policy(context)
-    if asyncio.iscoroutine(result):
-        result = await result
-    return _coerce(result)
+    raw = policy(context)
+    if asyncio.iscoroutine(raw):
+        resolved: bool | RetryDecision = await cast("Awaitable[bool | RetryDecision]", raw)
+    else:
+        resolved = cast("bool | RetryDecision", raw)
+    return _coerce(resolved)
