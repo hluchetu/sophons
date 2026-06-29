@@ -645,8 +645,9 @@ These rules keep the SDK clean and maintainable as it grows.
    ConversationManager, SessionManager, and RetryStrategy are Protocols.
    Developers can implement their own without inheriting anything from Sophons.
 
-6. Sync first, async later.
-   Build sync versions first. Async variants come after the sync API is stable.
+6. Async first.
+   loop.py and agent.py are async. Agent exposes run_sync() as a thin wrapper over asyncio.run().
+   This matches the industry standard — OpenAI Agents SDK, Strands, and LangGraph all follow this pattern.
 
 7. Tests before the Agent class.
    hooks.py, responses.py, and loop.py all have tests before agent.py is written.
