@@ -107,9 +107,6 @@ class InMemoryStorage:
 
     def put(self, entry: MemoryEntry) -> None:
         lookup = (entry.namespace, entry.key)
-        previous = self._by_key.get(lookup)
-        if previous is not None:
-            self._by_id.pop(previous.id, None)
         self._by_key[lookup] = entry
         self._by_id[entry.id] = entry
 
@@ -132,11 +129,10 @@ class InMemoryStorage:
         memory_type: MemoryType | None = None,
         include_invalidated: bool = False,
     ) -> list[MemoryEntry]:
-        entries = [
-            entry
-            for (ns, _), entry in self._by_key.items()
-            if ns == namespace
-        ]
+        # Use _by_id as the source of truth so invalidated historical
+        # entries are included when requested.
+        source = self._by_id.values() if include_invalidated else self._by_key.values()
+        entries = [e for e in source if e.namespace == namespace]
         if memory_type is not None:
             entries = [e for e in entries if e.memory_type == memory_type]
         if not include_invalidated:
