@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
-
 ToolArgs = dict[str, Any]
 ToolResult = dict[str, Any]
 ToolSchema = dict[str, Any]
@@ -16,8 +15,7 @@ class Tool(Protocol):
     description: str
     args_schema: ToolSchema
 
-    def call(self, args: ToolArgs) -> ToolResult:
-        ...
+    def call(self, args: ToolArgs) -> ToolResult: ...
 
 
 @runtime_checkable
@@ -28,5 +26,4 @@ class AsyncTool(Protocol):
     description: str
     args_schema: ToolSchema
 
-    async def call(self, args: ToolArgs) -> ToolResult:
-        ...
+    async def call(self, args: ToolArgs) -> ToolResult: ...
