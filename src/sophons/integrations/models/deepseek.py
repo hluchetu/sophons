@@ -22,16 +22,17 @@ class DeepSeekModel:
         self._thinking = thinking
         self._adapter = OpenAICompatAdapter()
 
-    def invoke(self, messages: list[Message], tools: list[Tool] | None = None) -> Message:
+    def invoke(
+        self, messages: list[Message], tools: list[Tool] | None = None
+    ) -> Message:
         kwargs: dict = dict(
             model=self.model,
             messages=self._adapter.serialize_messages(messages),
-            extra_body={
-                "thinking": {"type": "enabled" if self._thinking else "disabled"}
-            },
             temperature=0,
             stream=False,
         )
+        if self._thinking:
+            kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
         if tools:
             kwargs["tools"] = self._adapter.serialize_tools(tools)
 
@@ -41,10 +42,12 @@ class DeepSeekModel:
         tool_calls = _normalize_tool_calls(getattr(message, "tool_calls", None) or [])
         metadata = {"tool_calls": tool_calls} if tool_calls else {}
 
+        if getattr(message, "reasoning_content", None):
+            metadata["reasoning"] = message.reasoning_content
+
         return Message(
             role="assistant", content=message.content or "", metadata=metadata
         )
-
 
 
 def _normalize_tool_calls(raw: list) -> list[dict]:
