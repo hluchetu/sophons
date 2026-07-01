@@ -9,7 +9,7 @@ from sophons.models.messages import Message
 class ChatModel(Protocol):
     """Sync chat model contract: messages in, assistant message out."""
 
-    def invoke(self, messages: list[Message]) -> Message:
+    def invoke(self, messages: list[Message], tools: list | None = None) -> Message:
         ...
 
 
@@ -17,5 +17,5 @@ class ChatModel(Protocol):
 class AsyncChatModel(Protocol):
     """Async chat model contract: messages in, assistant message out."""
 
-    async def invoke(self, messages: list[Message]) -> Message:
+    async def invoke(self, messages: list[Message], tools: list | None = None) -> Message:
         ...

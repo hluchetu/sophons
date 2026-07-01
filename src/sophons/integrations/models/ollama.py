@@ -10,21 +10,19 @@ from sophons.models.messages import Message
 from sophons.tools.base import Tool
 
 
-class OllamaClient:
+class OllamaModel:
     def __init__(
         self,
         model: str,
         base_url: str = "http://localhost:11434",
         settings: ModelSettings | None = None,
-        tools: list[Tool] | None = None,
     ) -> None:
         self.model = model
         self._base_url = base_url.rstrip("/")
         self._settings = settings or ModelSettings()
-        self._tools = tools or []
         self._adapter = OpenAICompatAdapter()
 
-    def invoke(self, messages: list[Message]) -> Message:
+    def invoke(self, messages: list[Message], tools: list[Tool] | None = None) -> Message:
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": self._adapter.serialize_messages(messages),
@@ -34,8 +32,8 @@ class OllamaClient:
             },
             "stream": False,
         }
-        if self._tools:
-            payload["tools"] = self._adapter.serialize_tools(self._tools)
+        if tools:
+            payload["tools"] = self._adapter.serialize_tools(tools)
 
         body = json.dumps(payload).encode()
         req = urllib.request.Request(
@@ -57,23 +55,6 @@ class OllamaClient:
             metadata=metadata,
         )
 
-
-class OllamaProvider:
-    def __init__(self, base_url: str = "http://localhost:11434") -> None:
-        self._base_url = base_url
-
-    def get_model(
-        self,
-        model_name: str,
-        settings: ModelSettings,
-        tools: list[Tool] | None = None,
-    ) -> OllamaClient:
-        return OllamaClient(
-            model=model_name,
-            base_url=self._base_url,
-            settings=settings,
-            tools=tools,
-        )
 
 
 def _normalize_tool_calls(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:

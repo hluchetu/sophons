@@ -237,7 +237,7 @@ class AgentLoop:
     async def _invoke_model(self, messages: list[Message]) -> Message:
         """Call the model, supporting both sync and async ChatModel."""
         if hasattr(self._model, "invoke"):
-            result = self._model.invoke(messages)
+            result = self._model.invoke(messages, tools=list(self._tools.values()))
             if asyncio.iscoroutine(result):
                 return await result
             return result
