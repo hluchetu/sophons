@@ -112,7 +112,7 @@ class Agent:
             messages=prior_messages,
         )
 
-        await self._save_session(session_id, prior_messages, result)
+        await self._save_session(session_id, prior_messages, input, result)
         return result
 
     def run_sync(
@@ -173,26 +173,16 @@ class Agent:
         self,
         session_id: str | None,
         prior_messages: list,
+        user_input: str,
         result: AgentResult,
     ) -> None:
         if self._session_manager is None or session_id is None:
             return
 
-        # Reconstruct the full updated history:
-        # prior messages + the new user message + all assistant/tool messages
-        # We derive this from prior_messages and the result's tool activity.
-        # The loop already appended everything to its internal history, but
-        # we do not expose that directly. Instead we save what we know:
-        # prior + the final assistant message. Tool messages are captured
-        # via tool_uses/tool_results in the result metrics.
-        #
-        # For a complete history including tool turns, use a hook that
-        # captures MessageAdded events and save from there.
         from sophons.models.messages import Message
 
         updated = list(prior_messages)
-
-        # Add the final assistant message if the run produced one
+        updated.append(Message(role="user", content=user_input))
         if result.message:
             updated.append(Message(role="assistant", content=result.message))
 
