@@ -10,7 +10,7 @@ from sophons.agents.hooks import HookCallback, HookEventT, HookRegistry
 from sophons.agents.loop import AgentLoop
 from sophons.agents.responses import AgentResult
 from sophons.agents.retry import RetryStrategy, exponential_backoff
-from sophons.agents.session import SessionManager
+from sophons.agents.session import InMemorySessionManager, SessionManager
 from sophons.agents.state import RunLimits
 from sophons.tools.base import AsyncTool, Tool
 
@@ -28,7 +28,7 @@ class Agent:
     Minimal usage::
 
         agent = Agent(model=my_model)
-        result = await agent.run("What is the capital of France?")
+        result = agent("What is the capital of France?")
 
     With everything configured::
 
@@ -36,14 +36,10 @@ class Agent:
             model=my_model,
             tools=[search, calculator],
             system_prompt="You are a helpful assistant.",
-            hooks=registry,
-            conversation_manager=TokenBudgetManager(max_tokens=4096, token_counter=tc),
             session_manager=FileSessionManager("./sessions"),
-            retry_strategy=exponential_backoff(),
-            limits=RunLimits(max_steps=10),
         )
-
-        result = await agent.run("Hello", session_id="user-123")
+        agent.add_hook(my_callback)
+        result = agent("Hello", session_id="user-123")
 
     Session behaviour:
         If ``session_manager`` is provided and ``session_id`` is passed to
@@ -51,9 +47,9 @@ class Agent:
         and saves the updated history after — regardless of whether the run
         succeeded or failed.
 
-    Sync usage::
+    Async usage::
 
-        result = agent.run_sync("Hello")
+        result = await agent.run("Hello")
     """
 
     def __init__(
@@ -68,7 +64,7 @@ class Agent:
         retry_strategy: RetryStrategy | None = None,
         limits: RunLimits | None = None,
     ) -> None:
-        self._session_manager = session_manager
+        self._session_manager = session_manager or InMemorySessionManager()
         self._hooks = hooks or HookRegistry()
         self._loop = AgentLoop(
             model=model,
@@ -148,6 +144,15 @@ class Agent:
     def new_session_id(self) -> str:
         """Generate a fresh unique session ID."""
         return str(uuid.uuid4())
+
+    def __call__(
+        self,
+        input: str,
+        *,
+        session_id: str | None = None,
+    ) -> AgentResult:
+        """Shorthand for run_sync — lets you call the agent like a function."""
+        return self.run_sync(input, session_id=session_id)
 
     def add_hook(self, callback: HookCallback[HookEventT]) -> None:
         """Register a lifecycle hook by inferring its event annotation."""
