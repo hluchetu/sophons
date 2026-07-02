@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Type
+from inspect import signature
+from typing import Any, TypeAlias, TypeVar, cast, get_type_hints
 
 from sophons.agents.responses import AgentResult, ToolResult, ToolUse
 from sophons.models.messages import Message
@@ -77,8 +79,7 @@ class MessageAdded:
     step: int
 
 
-# All event types in one place — useful for type hints
-AgentHookEvent = (
+AgentHookEvent: TypeAlias = (
     AgentStarted
     | AgentFinished
     | AgentFailed
@@ -88,6 +89,22 @@ AgentHookEvent = (
     | AfterToolCall
     | MessageAdded
 )
+
+
+_AGENT_HOOK_EVENT_TYPES = (
+    AgentStarted,
+    AgentFinished,
+    AgentFailed,
+    BeforeModelCall,
+    AfterModelCall,
+    BeforeToolCall,
+    AfterToolCall,
+    MessageAdded,
+)
+
+HookEventT = TypeVar("HookEventT", bound=AgentHookEvent)
+HookCallback: TypeAlias = Callable[[HookEventT], None]
+HookEventType: TypeAlias = type[AgentHookEvent]
 
 
 # ── HookRegistry ───────────────────────────────────────────────────────────────
@@ -117,12 +134,12 @@ class HookRegistry:
     """
 
     def __init__(self) -> None:
-        self._hooks: dict[Type, list[Callable]] = {}
+        self._hooks: dict[HookEventType, list[Callable[[Any], None]]] = {}
 
     def register(
         self,
-        event_type: Type | list[Type],
-        callback: Callable,
+        event_type: HookEventType | list[HookEventType],
+        callback: Callable[[Any], None],
     ) -> None:
         """
         Register a callback for one or more event types.
@@ -137,11 +154,40 @@ class HookRegistry:
         """
         types = event_type if isinstance(event_type, list) else [event_type]
         for t in types:
-            if t not in self._hooks:
-                self._hooks[t] = []
-            self._hooks[t].append(callback)
+            self._hooks.setdefault(t, []).append(callback)
 
-    def invoke(self, event: Any) -> None:
+    def add(self, callback: HookCallback[HookEventT]) -> None:
+        """
+        Register a callback by inferring its event type annotation.
+
+        Example:
+            def on_after_model(event: AfterModelCall) -> None:
+                print(event.step)
+
+            hooks.add(on_after_model)
+        """
+        event_type = self._infer_event_type(callback)
+        self.register(event_type, callback)
+
+    def _infer_event_type(self, callback: HookCallback[HookEventT]) -> type[HookEventT]:
+        hints = get_type_hints(callback)
+
+        for parameter_name in signature(callback).parameters:
+            event_type = hints.get(parameter_name)
+            if event_type is None:
+                continue
+            if (
+                not isinstance(event_type, type)
+                or event_type not in _AGENT_HOOK_EVENT_TYPES
+            ):
+                raise TypeError(
+                    "Hook event annotation must be an agent hook event type"
+                )
+            return cast(type[HookEventT], event_type)
+
+        raise TypeError("Hook callback must annotate its event parameter")
+
+    def invoke(self, event: AgentHookEvent) -> None:
         """
         Invoke all callbacks registered for this event type.
 
@@ -155,7 +201,7 @@ class HookRegistry:
         for callback in callbacks:
             callback(event)
 
-    def has_hooks(self, event_type: Type | None = None) -> bool:
+    def has_hooks(self, event_type: HookEventType | None = None) -> bool:
         """
         Check if any callbacks are registered.
 
@@ -173,7 +219,7 @@ class HookRegistry:
             return any(len(cbs) > 0 for cbs in self._hooks.values())
         return bool(self._hooks.get(event_type))
 
-    def deregister(self, event_type: Type | None = None) -> None:
+    def deregister(self, event_type: HookEventType | None = None) -> None:
         """
         Remove callbacks for one event type or all event types.
 

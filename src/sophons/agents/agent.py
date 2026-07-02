@@ -6,7 +6,7 @@ import uuid
 from typing import Any
 
 from sophons.agents.conversation import ConversationManager
-from sophons.agents.hooks import HookRegistry
+from sophons.agents.hooks import HookCallback, HookEventT, HookRegistry
 from sophons.agents.loop import AgentLoop
 from sophons.agents.responses import AgentResult
 from sophons.agents.retry import RetryStrategy, exponential_backoff
@@ -69,11 +69,12 @@ class Agent:
         limits: RunLimits | None = None,
     ) -> None:
         self._session_manager = session_manager
+        self._hooks = hooks or HookRegistry()
         self._loop = AgentLoop(
             model=model,
             tools=tools,
             system_prompt=system_prompt,
-            hooks=hooks,
+            hooks=self._hooks,
             conversation_manager=conversation_manager,
             retry_strategy=retry_strategy or exponential_backoff(),
             limits=limits,
@@ -147,6 +148,10 @@ class Agent:
     def new_session_id(self) -> str:
         """Generate a fresh unique session ID."""
         return str(uuid.uuid4())
+
+    def add_hook(self, callback: HookCallback[HookEventT]) -> None:
+        """Register a lifecycle hook by inferring its event annotation."""
+        self._hooks.add(callback)
 
     # ------------------------------------------------------------------
     # Session helpers

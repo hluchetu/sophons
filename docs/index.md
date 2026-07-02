@@ -25,6 +25,7 @@ long-term memory, and retrieval — so you focus on what your agent actually doe
 | Module | What it does |
 |---|---|
 | [`sophons.agents`](/docs/sophons/agents) | Agent loop, conversation management, retry, hooks, session persistence |
+| [`sophons.tools`](/docs/sophons/tools) | Decorate Python functions as agent-callable tools |
 | [`sophons.memory`](/docs/sophons/memory) | Long-term memory storage, retrieval, extraction, and reflection |
 | [`sophons.rag`](/docs/sophons/rag) | Document splitting, retrieval, compression, and RAG pipeline |
 | `sophons.models` | `ChatModel` and `AsyncChatModel` protocols — bring your own model adapter |
@@ -72,5 +73,6 @@ pip install -e /path/to/sophons
 ## What's next
 
 - [Agents](/docs/sophons/agents) — how the agent loop works
+- [Tools](/docs/sophons/tools) — how to define functions agents can call
 - [Memory](/docs/sophons/memory) — long-term memory from scratch
 - [RAG](/docs/sophons/rag) — document splitting and retrieval
