@@ -49,8 +49,8 @@ class SentenceTransformerEmbeddings:
 
     def embed_query(self, text: str) -> Vector:
         """Embed a single query string."""
-        return self._model.encode(text, convert_to_list=True)
+        return self._model.encode(text).tolist()
 
     def embed_documents(self, texts: list[str]) -> list[Vector]:
         """Embed a batch of document strings."""
-        return self._model.encode(texts, convert_to_list=True)
+        return self._model.encode(texts).tolist()
