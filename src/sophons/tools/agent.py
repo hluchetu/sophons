@@ -8,9 +8,9 @@ from sophons.tools.base import ToolArgs, ToolResult, ToolSchema
 
 @runtime_checkable
 class Runnable(Protocol):
-    """Anything that can be called with a string and returns a result with a .message attribute."""
+    """Anything with an async run() that returns a result with a .message attribute."""
 
-    def __call__(self, input: str) -> Any: ...
+    async def run(self, input: str) -> Any: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +29,6 @@ class AgentTool:
             "required": ["input"],
         }
 
-    def call(self, args: ToolArgs) -> ToolResult:
-        result = self.agent(args["input"])
+    async def call(self, args: ToolArgs) -> ToolResult:
+        result = await self.agent.run(args["input"])
         return {"result": result.message}
