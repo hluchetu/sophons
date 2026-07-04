@@ -1,23 +1,27 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
-from sophons.tools.decorator import FunctionTool
+from sophons.tools.base import ToolArgs, ToolResult, ToolSchema
 
 
-def as_tool(agent: Any, *, name: str, description: str) -> FunctionTool:
-    """Wrap a Sophons Agent as a FunctionTool so a supervisor can call it like any other tool."""
+@dataclass(frozen=True, slots=True)
+class AgentTool:
+    """A tool that wraps a Sophons Agent — lets a supervisor delegate to a specialist."""
 
-    def run(input: str) -> str:
-        return agent(input).message
+    name: str
+    description: str
+    agent: Any
 
-    return FunctionTool(
-        name=name,
-        description=description,
-        args_schema={
+    @property
+    def args_schema(self) -> ToolSchema:
+        return {
             "type": "object",
             "properties": {"input": {"type": "string"}},
             "required": ["input"],
-        },
-        fn=run,
-    )
+        }
+
+    def call(self, args: ToolArgs) -> ToolResult:
+        result = self.agent(args["input"])
+        return {"result": result.message}
