@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from sophons.tools.base import ToolArgs, ToolResult, ToolSchema
+
+
+@runtime_checkable
+class Runnable(Protocol):
+    """Anything that can be called with a string and returns a result with a .message attribute."""
+
+    def __call__(self, input: str) -> Any: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -12,7 +19,7 @@ class AgentTool:
 
     name: str
     description: str
-    agent: Any
+    agent: Runnable
 
     @property
     def args_schema(self) -> ToolSchema:
