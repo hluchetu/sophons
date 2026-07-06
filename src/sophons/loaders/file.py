@@ -9,6 +9,7 @@ from sophons.loaders.base import Loader
 from sophons.loaders.docx import DocxLoader
 from sophons.loaders.pdf import PDFLoader
 from sophons.loaders.text import TextLoader
+from sophons.observability import SpanKind, Tracer, maybe_span
 
 
 class FileLoader:
@@ -20,14 +21,25 @@ class FileLoader:
         *,
         id: str | None = None,
         metadata: dict[str, Any] | None = None,
+        tracer: Tracer | None = None,
     ) -> None:
         self.path = Path(path)
         self.id = id
         self.metadata = dict(metadata or {})
+        self._tracer = tracer
         self._loader = self._select_loader()
 
     def load(self) -> list[Document]:
-        return self._loader.load()
+        with maybe_span(
+            self._tracer,
+            "loader.load",
+            kind=SpanKind.LOADER,
+            loader="file",
+            path=str(self.path),
+        ) as span:
+            documents = self._loader.load()
+            span.set_attribute("document_count", len(documents))
+            return documents
 
     def lazy_load(self):
         yield from self._loader.lazy_load()

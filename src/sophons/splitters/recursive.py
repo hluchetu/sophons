@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from sophons.documents import Document
+from sophons.observability import SpanKind, Tracer, maybe_span
 
 
 class RecursiveCharacterSplitter:
@@ -14,7 +15,9 @@ class RecursiveCharacterSplitter:
         chunk_size: int = 1000,
         chunk_overlap: int = 100,
         separators: list[str] | None = None,
+        tracer: Tracer | None = None,
     ) -> None:
+        self._tracer = tracer
         if chunk_size <= 0:
             raise ValueError("chunk_size must be greater than 0.")
         if chunk_overlap < 0:
@@ -42,10 +45,20 @@ class RecursiveCharacterSplitter:
         ]
 
     def split_documents(self, documents: Iterable[Document]) -> list[Document]:
-        chunks: list[Document] = []
-        for document in documents:
-            chunks.extend(self.split_document(document))
-        return chunks
+        with maybe_span(
+            self._tracer,
+            "splitter.split",
+            kind=SpanKind.SPLITTER,
+            splitter="recursive",
+        ) as span:
+            document_count = 0
+            chunks: list[Document] = []
+            for document in documents:
+                document_count += 1
+                chunks.extend(self.split_document(document))
+            span.set_attribute("document_count", document_count)
+            span.set_attribute("chunk_count", len(chunks))
+            return chunks
 
     def split_text(self, text: str) -> list[str]:
         stripped = text.strip()

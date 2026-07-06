@@ -12,6 +12,7 @@ from sophons.memory.long_term.search import MemorySearch
 from sophons.memory.long_term.store import MemoryStore
 from sophons.memory.reflection import MemoryReflector, ReflectionResult
 from sophons.models.messages import Message
+from sophons.observability import SpanKind, Tracer, maybe_span
 
 
 # ---------------------------------------------------------------------------
@@ -76,12 +77,15 @@ class MemoryManager:
         stores: list[MemoryStoreConfig],
         extractor: MemoryExtractor | None = None,
         reflector: MemoryReflector | None = None,
+        *,
+        tracer: Tracer | None = None,
     ) -> None:
         if not stores:
             raise ValueError("MemoryManager requires at least one store.")
         self._stores = stores
         self._extractor = extractor
         self._reflector = reflector
+        self._tracer = tracer
 
     # ------------------------------------------------------------------
     # add — extract + store (primary write path)
@@ -105,6 +109,22 @@ class MemoryManager:
         4. Invalidate any keys the extractor flagged as stale.
         5. Optionally trigger reflection via ``MemoryReflector.observe()``.
         """
+        with maybe_span(
+            self._tracer,
+            "memory.write",
+            kind=SpanKind.MEMORY,
+            namespace="/".join(namespace),
+        ) as span:
+            result = await self._add(messages, namespace)
+            span.set_attribute("entry_count", len(result.entries))
+            span.set_attribute("invalidated_count", len(result.invalidated_keys))
+            return result
+
+    async def _add(
+        self,
+        messages: list[Message],
+        namespace: tuple[str, ...],
+    ) -> MemoryExtractionResult:
         if self._extractor is None:
             return MemoryExtractionResult(
                 entries=[],
@@ -158,6 +178,27 @@ class MemoryManager:
         When ``store_name`` is provided, only that store is queried.
         Results are deduplicated by entry ID.
         """
+        with maybe_span(
+            self._tracer,
+            "memory.retrieve",
+            kind=SpanKind.MEMORY,
+            namespace="/".join(namespace),
+            limit=limit,
+        ) as span:
+            results = self._search(
+                query, namespace, limit=limit, store_name=store_name
+            )
+            span.set_attribute("result_count", len(results))
+            return results
+
+    def _search(
+        self,
+        query: str,
+        namespace: tuple[str, ...],
+        *,
+        limit: int,
+        store_name: str | None,
+    ) -> list[MemoryEntry]:
         if store_name is not None:
             config = next((c for c in self._stores if c.name == store_name), None)
             if config is None:

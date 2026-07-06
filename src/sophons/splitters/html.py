@@ -4,10 +4,14 @@ from collections.abc import Iterable
 from html.parser import HTMLParser
 
 from sophons.documents import Document
+from sophons.observability import SpanKind, Tracer, maybe_span
 
 
 class HTMLSplitter:
     """Split HTML documents into text chunks using common block tags."""
+
+    def __init__(self, *, tracer: Tracer | None = None) -> None:
+        self._tracer = tracer
 
     def split_document(self, document: Document) -> list[Document]:
         chunks = self.split_text(document.content)
@@ -27,10 +31,20 @@ class HTMLSplitter:
         ]
 
     def split_documents(self, documents: Iterable[Document]) -> list[Document]:
-        chunks: list[Document] = []
-        for document in documents:
-            chunks.extend(self.split_document(document))
-        return chunks
+        with maybe_span(
+            self._tracer,
+            "splitter.split",
+            kind=SpanKind.SPLITTER,
+            splitter="html",
+        ) as span:
+            document_count = 0
+            chunks: list[Document] = []
+            for document in documents:
+                document_count += 1
+                chunks.extend(self.split_document(document))
+            span.set_attribute("document_count", document_count)
+            span.set_attribute("chunk_count", len(chunks))
+            return chunks
 
     def split_text(self, html: str) -> list["_HTMLChunk"]:
         parser = _HTMLChunkParser()

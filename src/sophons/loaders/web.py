@@ -5,6 +5,7 @@ from typing import Any
 from urllib.request import Request, urlopen
 
 from sophons.documents import Document
+from sophons.observability import SpanKind, Tracer, maybe_span
 
 
 class _HTMLTextExtractor(HTMLParser):
@@ -48,14 +49,28 @@ class WebPageLoader:
         metadata: dict[str, Any] | None = None,
         timeout: float = 20,
         user_agent: str = "Sophons/0.1",
+        tracer: Tracer | None = None,
     ) -> None:
         self.url = url
         self.id = id or url
         self.metadata = dict(metadata or {})
         self.timeout = timeout
         self.user_agent = user_agent
+        self._tracer = tracer
 
     def load(self) -> list[Document]:
+        with maybe_span(
+            self._tracer,
+            "loader.load",
+            kind=SpanKind.LOADER,
+            loader="web",
+            url=self.url,
+        ) as span:
+            documents = self._load()
+            span.set_attribute("document_count", len(documents))
+            return documents
+
+    def _load(self) -> list[Document]:
         request = Request(self.url, headers={"User-Agent": self.user_agent})
         with urlopen(request, timeout=self.timeout) as response:
             raw = response.read()

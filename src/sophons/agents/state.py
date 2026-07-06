@@ -3,6 +3,8 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
+from sophons.agents.responses import ToolStats
+
 # ── RunLimits ──────────────────────────────────────────────────────────────────
 
 
@@ -44,7 +46,18 @@ class RunState:
     tool_call_count: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    per_tool: dict[str, ToolStats] = field(default_factory=dict)
     started_at: float = field(default_factory=time.monotonic)
+
+    def record_tool_call(self, tool_name: str, duration_ms: float, *, error: bool) -> None:
+        """Update per-tool stats after a tool finishes executing."""
+        stats = self.per_tool.setdefault(tool_name, ToolStats())
+        stats.calls += 1
+        stats.total_ms += duration_ms
+        if error:
+            stats.errors += 1
 
     def elapsed_seconds(self) -> float:
         """How many seconds have passed since this run started."""

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal
 
@@ -39,13 +39,29 @@ class ToolResult:
 
 # ------metrics
 @dataclass
+class ToolStats:
+    """Per-tool call counts and latency for a single agent run."""
+
+    calls: int = 0
+    errors: int = 0
+    total_ms: float = 0.0
+
+    @property
+    def avg_ms(self) -> float:
+        return self.total_ms / self.calls if self.calls else 0.0
+
+
+@dataclass
 class AgentMetrics:
     steps: int = 0
     model_calls: int = 0
     tool_calls: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_read_tokens: int = 0  # tokens read from provider cache
+    cache_write_tokens: int = 0  # tokens written to provider cache
     duration_ms: float = 0
+    per_tool: dict[str, ToolStats] = field(default_factory=dict)
 
 
 @dataclass

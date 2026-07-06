@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterable
 
 from sophons.documents import Document
 from sophons.errors import ConfigurationError
+from sophons.observability import SpanKind, Tracer, maybe_span
 
 Tokenizer = Callable[[str], list[str]]
 
@@ -21,7 +22,9 @@ class BM25Retriever:
         tokenizer: Tokenizer | None = None,
         k1: float = 1.5,
         b: float = 0.75,
+        tracer: Tracer | None = None,
     ) -> None:
+        self._tracer = tracer
         if k1 <= 0:
             raise ConfigurationError(
                 "k1 must be greater than 0.",
@@ -61,10 +64,23 @@ class BM25Retriever:
         tokenizer: Tokenizer | None = None,
         k1: float = 1.5,
         b: float = 0.75,
+        tracer: Tracer | None = None,
     ) -> BM25Retriever:
-        return cls(documents, tokenizer=tokenizer, k1=k1, b=b)
+        return cls(documents, tokenizer=tokenizer, k1=k1, b=b, tracer=tracer)
 
     def retrieve(self, query: str, *, limit: int = 10) -> list[Document]:
+        with maybe_span(
+            self._tracer,
+            "retriever.search",
+            kind=SpanKind.RETRIEVER,
+            retriever="bm25",
+            limit=limit,
+        ) as span:
+            results = self._retrieve(query, limit=limit)
+            span.set_attribute("result_count", len(results))
+            return results
+
+    def _retrieve(self, query: str, *, limit: int) -> list[Document]:
         if limit <= 0:
             return []
 

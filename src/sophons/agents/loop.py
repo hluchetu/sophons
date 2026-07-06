@@ -158,6 +158,8 @@ class AgentLoop:
                 state.model_call_count += 1
                 state.input_tokens += _extract_tokens(response, "input_tokens")
                 state.output_tokens += _extract_tokens(response, "output_tokens")
+                state.cache_read_tokens += _extract_tokens(response, "cache_read_tokens")
+                state.cache_write_tokens += _extract_tokens(response, "cache_write_tokens")
 
                 self._hooks.invoke(
                     AfterModelCall(
@@ -180,6 +182,7 @@ class AgentLoop:
                         tool_result = await self._execute_tool(
                             tool_use=tool_use,
                             step=state.step_count,
+                            state=state,
                         )
                         tool_uses.append(tool_use)
                         tool_results.append(tool_result)
@@ -250,6 +253,7 @@ class AgentLoop:
         *,
         tool_use: ToolUse,
         step: int,
+        state: RunState,
     ) -> ToolResult:
         """Look up and execute a tool, returning a ToolResult."""
         self._hooks.invoke(BeforeToolCall(tool_use=tool_use, step=step))
@@ -285,6 +289,9 @@ class AgentLoop:
                 )
 
         tool_call_ms = (time.monotonic() - tool_call_start) * 1000
+        state.record_tool_call(
+            tool_use.name, tool_call_ms, error=tool_result.status == "error"
+        )
         self._hooks.invoke(
             AfterToolCall(
                 tool_use=tool_use,
@@ -313,7 +320,10 @@ class AgentLoop:
             tool_calls=state.tool_call_count,
             input_tokens=state.input_tokens,
             output_tokens=state.output_tokens,
+            cache_read_tokens=state.cache_read_tokens,
+            cache_write_tokens=state.cache_write_tokens,
             duration_ms=state.elapsed_seconds() * 1000,
+            per_tool=state.per_tool,
         )
         return AgentResult(
             stop_reason=stop_reason,

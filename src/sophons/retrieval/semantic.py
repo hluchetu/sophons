@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from sophons.documents import Document
 from sophons.models.embeddings import EmbeddingModel
+from sophons.observability import SpanKind, Tracer, maybe_span
 from sophons.retrieval.base import VectorStore
 
 
@@ -30,9 +31,16 @@ class SemanticRetriever:
         results = retriever.retrieve("what is the refund policy?", limit=3)
     """
 
-    def __init__(self, embedder: EmbeddingModel, vector_store: VectorStore) -> None:
+    def __init__(
+        self,
+        embedder: EmbeddingModel,
+        vector_store: VectorStore,
+        *,
+        tracer: Tracer | None = None,
+    ) -> None:
         self._embedder = embedder
         self._store = vector_store
+        self._tracer = tracer
 
     def add(self, documents: list[Document]) -> None:
         """Embed and index a list of documents."""
@@ -44,5 +52,14 @@ class SemanticRetriever:
 
     def retrieve(self, query: str, *, limit: int = 10) -> list[Document]:
         """Return the most semantically similar documents to ``query``."""
-        vector = self._embedder.embed_query(query)
-        return self._store.search(vector, limit=limit)
+        with maybe_span(
+            self._tracer,
+            "retriever.search",
+            kind=SpanKind.RETRIEVER,
+            retriever="semantic",
+            limit=limit,
+        ) as span:
+            vector = self._embedder.embed_query(query)
+            results = self._store.search(vector, limit=limit)
+            span.set_attribute("result_count", len(results))
+            return results
