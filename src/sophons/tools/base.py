@@ -11,9 +11,14 @@ ToolSchema = dict[str, Any]
 class Tool(Protocol):
     """Sync tool contract: structured arguments in, structured result out."""
 
-    name: str
-    description: str
-    args_schema: ToolSchema
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def description(self) -> str: ...
+
+    @property
+    def args_schema(self) -> ToolSchema: ...
 
     def call(self, args: ToolArgs) -> ToolResult: ...
 
@@ -22,8 +27,13 @@ class Tool(Protocol):
 class AsyncTool(Protocol):
     """Async tool contract: structured arguments in, structured result out."""
 
-    name: str
-    description: str
-    args_schema: ToolSchema
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def description(self) -> str: ...
+
+    @property
+    def args_schema(self) -> ToolSchema: ...
 
     async def call(self, args: ToolArgs) -> ToolResult: ...
