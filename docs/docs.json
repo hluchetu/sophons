@@ -1,0 +1,50 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "Sophons",
+  "colors": {
+    "primary": "#256f68",
+    "light": "#fbfaf7",
+    "dark": "#10201f"
+  },
+  "navigation": {
+    "groups": [
+      {
+        "group": "Getting Started",
+        "pages": [
+          "index",
+          "getting-started/installation",
+          "getting-started/quickstart"
+        ]
+      },
+      {
+        "group": "Core Concepts",
+        "pages": [
+          "core-concepts/agents",
+          "core-concepts/tools",
+          "core-concepts/messages",
+          "core-concepts/models"
+        ]
+      },
+      {
+        "group": "Architecture",
+        "pages": [
+          "architecture/llms",
+          "architecture/memory",
+          "architecture/rag",
+          "architecture/retrievers",
+          "architecture/storage",
+          "architecture/integrations"
+        ]
+      },
+      {
+        "group": "Reference",
+        "pages": [
+          "reference/agents",
+          "reference/tools",
+          "reference/models"
+        ]
+      }
+    ]
+  }
+}
