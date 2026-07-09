@@ -45,6 +45,16 @@ class DeepSeekModel:
         if getattr(message, "reasoning_content", None):
             metadata["reasoning"] = message.reasoning_content
 
+        if response.usage is not None:
+            usage = {
+                "input_tokens": response.usage.prompt_tokens,
+                "output_tokens": response.usage.completion_tokens,
+            }
+            cache_hit = getattr(response.usage, "prompt_cache_hit_tokens", None)
+            if cache_hit is not None:
+                usage["cache_read_tokens"] = cache_hit
+            metadata["usage"] = usage
+
         return Message(
             role="assistant", content=message.content or "", metadata=metadata
         )
