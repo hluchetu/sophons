@@ -10,7 +10,7 @@ class ToolCallingModel:
         self.calls = 0
         self.messages_seen: list[list[Message]] = []
 
-    def invoke(self, messages: list[Message]) -> Message:
+    def invoke(self, messages: list[Message], tools: list | None = None) -> Message:
         self.calls += 1
         self.messages_seen.append(messages)
 

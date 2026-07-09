@@ -3,15 +3,16 @@ from __future__ import annotations
 from collections.abc import Iterable
 from html.parser import HTMLParser
 
+from opentelemetry import trace
+
 from sophons.documents import Document
-from sophons.observability import SpanKind, Tracer, maybe_span
+from sophons.observability import _semconv
+
+_TRACER = trace.get_tracer("sophons.splitters")
 
 
 class HTMLSplitter:
     """Split HTML documents into text chunks using common block tags."""
-
-    def __init__(self, *, tracer: Tracer | None = None) -> None:
-        self._tracer = tracer
 
     def split_document(self, document: Document) -> list[Document]:
         chunks = self.split_text(document.content)
@@ -31,19 +32,17 @@ class HTMLSplitter:
         ]
 
     def split_documents(self, documents: Iterable[Document]) -> list[Document]:
-        with maybe_span(
-            self._tracer,
+        with _TRACER.start_as_current_span(
             "splitter.split",
-            kind=SpanKind.SPLITTER,
-            splitter="html",
+            attributes={_semconv.SPLITTER: "html"},
         ) as span:
             document_count = 0
             chunks: list[Document] = []
             for document in documents:
                 document_count += 1
                 chunks.extend(self.split_document(document))
-            span.set_attribute("document_count", document_count)
-            span.set_attribute("chunk_count", len(chunks))
+            span.set_attribute(_semconv.DOCUMENT_COUNT, document_count)
+            span.set_attribute(_semconv.CHUNK_COUNT, len(chunks))
             return chunks
 
     def split_text(self, html: str) -> list["_HTMLChunk"]:

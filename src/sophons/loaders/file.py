@@ -9,7 +9,11 @@ from sophons.loaders.base import Loader
 from sophons.loaders.docx import DocxLoader
 from sophons.loaders.pdf import PDFLoader
 from sophons.loaders.text import TextLoader
-from sophons.observability import SpanKind, Tracer, maybe_span
+from opentelemetry import trace
+
+from sophons.observability import _semconv
+
+_TRACER = trace.get_tracer("sophons.loaders")
 
 
 class FileLoader:
@@ -21,24 +25,22 @@ class FileLoader:
         *,
         id: str | None = None,
         metadata: dict[str, Any] | None = None,
-        tracer: Tracer | None = None,
     ) -> None:
         self.path = Path(path)
         self.id = id
         self.metadata = dict(metadata or {})
-        self._tracer = tracer
         self._loader = self._select_loader()
 
     def load(self) -> list[Document]:
-        with maybe_span(
-            self._tracer,
+        with _TRACER.start_as_current_span(
             "loader.load",
-            kind=SpanKind.LOADER,
-            loader="file",
-            path=str(self.path),
+            attributes={
+                _semconv.LOADER: "file",
+                _semconv.PATH: str(self.path),
+            },
         ) as span:
             documents = self._loader.load()
-            span.set_attribute("document_count", len(documents))
+            span.set_attribute(_semconv.DOCUMENT_COUNT, len(documents))
             return documents
 
     def lazy_load(self):

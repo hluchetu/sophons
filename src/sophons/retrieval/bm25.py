@@ -5,11 +5,15 @@ import re
 from collections import Counter
 from collections.abc import Callable, Iterable
 
+from opentelemetry import trace
+
 from sophons.documents import Document
 from sophons.errors import ConfigurationError
-from sophons.observability import SpanKind, Tracer, maybe_span
+from sophons.observability import _semconv
 
 Tokenizer = Callable[[str], list[str]]
+
+_TRACER = trace.get_tracer("sophons.retrieval")
 
 
 class BM25Retriever:
@@ -22,9 +26,7 @@ class BM25Retriever:
         tokenizer: Tokenizer | None = None,
         k1: float = 1.5,
         b: float = 0.75,
-        tracer: Tracer | None = None,
     ) -> None:
-        self._tracer = tracer
         if k1 <= 0:
             raise ConfigurationError(
                 "k1 must be greater than 0.",
@@ -64,20 +66,16 @@ class BM25Retriever:
         tokenizer: Tokenizer | None = None,
         k1: float = 1.5,
         b: float = 0.75,
-        tracer: Tracer | None = None,
     ) -> BM25Retriever:
-        return cls(documents, tokenizer=tokenizer, k1=k1, b=b, tracer=tracer)
+        return cls(documents, tokenizer=tokenizer, k1=k1, b=b)
 
     def retrieve(self, query: str, *, limit: int = 10) -> list[Document]:
-        with maybe_span(
-            self._tracer,
+        with _TRACER.start_as_current_span(
             "retriever.search",
-            kind=SpanKind.RETRIEVER,
-            retriever="bm25",
-            limit=limit,
+            attributes={_semconv.RETRIEVER: "bm25", _semconv.LIMIT: limit},
         ) as span:
             results = self._retrieve(query, limit=limit)
-            span.set_attribute("result_count", len(results))
+            span.set_attribute(_semconv.RESULT_COUNT, len(results))
             return results
 
     def _retrieve(self, query: str, *, limit: int) -> list[Document]:

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from opentelemetry import trace
+
 from sophons.documents import Document
 from sophons.models.embeddings import EmbeddingModel
-from sophons.observability import SpanKind, Tracer, maybe_span
+from sophons.observability import _semconv
 from sophons.retrieval.base import VectorStore
+
+_TRACER = trace.get_tracer("sophons.retrieval")
 
 
 class SemanticRetriever:
@@ -35,12 +39,9 @@ class SemanticRetriever:
         self,
         embedder: EmbeddingModel,
         vector_store: VectorStore,
-        *,
-        tracer: Tracer | None = None,
     ) -> None:
         self._embedder = embedder
         self._store = vector_store
-        self._tracer = tracer
 
     def add(self, documents: list[Document]) -> None:
         """Embed and index a list of documents."""
@@ -52,14 +53,11 @@ class SemanticRetriever:
 
     def retrieve(self, query: str, *, limit: int = 10) -> list[Document]:
         """Return the most semantically similar documents to ``query``."""
-        with maybe_span(
-            self._tracer,
+        with _TRACER.start_as_current_span(
             "retriever.search",
-            kind=SpanKind.RETRIEVER,
-            retriever="semantic",
-            limit=limit,
+            attributes={_semconv.RETRIEVER: "semantic", _semconv.LIMIT: limit},
         ) as span:
             vector = self._embedder.embed_query(query)
             results = self._store.search(vector, limit=limit)
-            span.set_attribute("result_count", len(results))
+            span.set_attribute(_semconv.RESULT_COUNT, len(results))
             return results

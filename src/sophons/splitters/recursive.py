@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from opentelemetry import trace
+
 from sophons.documents import Document
-from sophons.observability import SpanKind, Tracer, maybe_span
+from sophons.observability import _semconv
+
+_TRACER = trace.get_tracer("sophons.splitters")
 
 
 class RecursiveCharacterSplitter:
@@ -15,9 +19,7 @@ class RecursiveCharacterSplitter:
         chunk_size: int = 1000,
         chunk_overlap: int = 100,
         separators: list[str] | None = None,
-        tracer: Tracer | None = None,
     ) -> None:
-        self._tracer = tracer
         if chunk_size <= 0:
             raise ValueError("chunk_size must be greater than 0.")
         if chunk_overlap < 0:
@@ -45,19 +47,17 @@ class RecursiveCharacterSplitter:
         ]
 
     def split_documents(self, documents: Iterable[Document]) -> list[Document]:
-        with maybe_span(
-            self._tracer,
+        with _TRACER.start_as_current_span(
             "splitter.split",
-            kind=SpanKind.SPLITTER,
-            splitter="recursive",
+            attributes={_semconv.SPLITTER: "recursive"},
         ) as span:
             document_count = 0
             chunks: list[Document] = []
             for document in documents:
                 document_count += 1
                 chunks.extend(self.split_document(document))
-            span.set_attribute("document_count", document_count)
-            span.set_attribute("chunk_count", len(chunks))
+            span.set_attribute(_semconv.DOCUMENT_COUNT, document_count)
+            span.set_attribute(_semconv.CHUNK_COUNT, len(chunks))
             return chunks
 
     def split_text(self, text: str) -> list[str]:

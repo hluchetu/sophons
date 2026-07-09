@@ -6,7 +6,11 @@ from typing import Any
 
 from sophons.documents import Document
 from sophons.loaders.file import FileLoader, UnsupportedFileTypeError
-from sophons.observability import SpanKind, Tracer, maybe_span
+from opentelemetry import trace
+
+from sophons.observability import _semconv
+
+_TRACER = trace.get_tracer("sophons.loaders")
 
 
 class DirectoryLoader:
@@ -19,24 +23,22 @@ class DirectoryLoader:
         glob: str = "**/*",
         metadata: dict[str, Any] | None = None,
         ignore_unsupported: bool = True,
-        tracer: Tracer | None = None,
     ) -> None:
         self.path = Path(path)
         self.glob = glob
         self.metadata = dict(metadata or {})
         self.ignore_unsupported = ignore_unsupported
-        self._tracer = tracer
 
     def load(self) -> list[Document]:
-        with maybe_span(
-            self._tracer,
+        with _TRACER.start_as_current_span(
             "loader.load",
-            kind=SpanKind.LOADER,
-            loader="directory",
-            path=str(self.path),
+            attributes={
+                _semconv.LOADER: "directory",
+                _semconv.PATH: str(self.path),
+            },
         ) as span:
             documents = list(self.lazy_load())
-            span.set_attribute("document_count", len(documents))
+            span.set_attribute(_semconv.DOCUMENT_COUNT, len(documents))
             return documents
 
     def lazy_load(self) -> Iterable[Document]:
