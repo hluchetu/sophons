@@ -23,6 +23,11 @@ class Document:
 
         return replace(self, score=score)
 
+    def with_id(self, id: str | None) -> Document:
+        """Return a copy with a document ID."""
+
+        return replace(self, id=id)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,

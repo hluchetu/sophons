@@ -20,6 +20,8 @@ from sophons.agents.hooks import (
     AgentStarted,
     BeforeModelCall,
     BeforeToolCall,
+    HookCallback,
+    HookEventType,
     HookRegistry,
     MessageAdded,
 )
@@ -64,6 +66,8 @@ __all__ = [
     "ToolResult",
     # Hooks
     "HookRegistry",
+    "HookCallback",
+    "HookEventType",
     "AgentStarted",
     "AgentFinished",
     "AgentFailed",

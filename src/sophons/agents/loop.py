@@ -7,6 +7,9 @@ import time
 import uuid
 from typing import Any
 
+from opentelemetry import trace
+from opentelemetry.trace import StatusCode
+
 from sophons.agents.conversation import ConversationManager
 from sophons.agents.hooks import (
     AfterModelCall,
@@ -29,9 +32,12 @@ from sophons.agents.responses import (
 from sophons.agents.retry import RetryStrategy, no_retry
 from sophons.agents.state import RunLimits, RunState
 from sophons.models.messages import Message
+from sophons.observability import _semconv
 from sophons.tools.base import AsyncTool, Tool
 
 logger = logging.getLogger(__name__)
+
+_TRACER = trace.get_tracer("sophons.agents")
 
 
 # ---------------------------------------------------------------------------
@@ -122,113 +128,134 @@ class AgentLoop:
         tool_uses: list[ToolUse] = []
         tool_results: list[ToolResult] = []
 
-        try:
-            while True:
-                # ── 1. Check limits ────────────────────────────────────────
-                exceeded = state.exceeds(self._limits)
-                if exceeded is not None:
-                    stop_reason = _limit_to_stop_reason(exceeded)
-                    return self._build_result(
-                        stop_reason=stop_reason,
-                        message="",
+        root_attributes: dict[str, Any] = {}
+        if session_id is not None:
+            root_attributes[_semconv.SESSION_ID] = session_id
+
+        with _TRACER.start_as_current_span(
+            "invoke_agent", attributes=root_attributes
+        ) as root_span:
+            try:
+                while True:
+                    # ── 1. Check limits ────────────────────────────────────
+                    exceeded = state.exceeds(self._limits)
+                    if exceeded is not None:
+                        stop_reason = _limit_to_stop_reason(exceeded)
+                        result = self._build_result(
+                            stop_reason=stop_reason,
+                            message="",
+                            state=state,
+                            tool_uses=tool_uses,
+                            tool_results=tool_results,
+                            success=False,
+                            session_id=session_id,
+                        )
+                        _record_result(root_span, result)
+                        return result
+
+                    # ── 2. Prepare context ─────────────────────────────────
+                    if self._conversation_manager is not None:
+                        context = self._conversation_manager.prepare(history)
+                    else:
+                        context = list(history)
+
+                    # ── 3. Call model ──────────────────────────────────────
+                    self._hooks.invoke(
+                        BeforeModelCall(messages=context, step=state.step_count)
+                    )
+
+                    model_call_start = time.monotonic()
+                    with _TRACER.start_as_current_span(
+                        "chat", attributes={_semconv.STEP: state.step_count}
+                    ) as model_span:
+                        response: Message = await self._retry_strategy.execute(
+                            lambda: self._invoke_model(context)
+                        )
+                        _record_usage(model_span, response)
+                    model_call_ms = (time.monotonic() - model_call_start) * 1000
+
+                    state.model_call_count += 1
+                    state.input_tokens += _extract_tokens(response, "input_tokens")
+                    state.output_tokens += _extract_tokens(response, "output_tokens")
+                    state.cache_read_tokens += _extract_tokens(response, "cache_read_tokens")
+                    state.cache_write_tokens += _extract_tokens(response, "cache_write_tokens")
+
+                    self._hooks.invoke(
+                        AfterModelCall(
+                            message=response,
+                            step=state.step_count,
+                            duration_ms=model_call_ms,
+                        )
+                    )
+
+                    history.append(response)
+                    self._hooks.invoke(
+                        MessageAdded(message=response, step=state.step_count)
+                    )
+
+                    # ── 4. Handle tool calls ───────────────────────────────
+                    pending_tool_uses = _extract_tool_uses(response)
+
+                    if pending_tool_uses:
+                        for tool_use in pending_tool_uses:
+                            tool_result = await self._execute_tool(
+                                tool_use=tool_use,
+                                step=state.step_count,
+                                state=state,
+                            )
+                            tool_uses.append(tool_use)
+                            tool_results.append(tool_result)
+                            state.tool_call_count += 1
+
+                            result_message = _tool_result_to_message(tool_result)
+                            history.append(result_message)
+                            self._hooks.invoke(
+                                MessageAdded(
+                                    message=result_message, step=state.step_count
+                                )
+                            )
+
+                        state.step_count += 1
+                        continue
+
+                    # ── 5. Final answer ────────────────────────────────────
+                    state.step_count += 1
+                    result = self._build_result(
+                        stop_reason=StopReason.END_TURN,
+                        message=response.content,
                         state=state,
                         tool_uses=tool_uses,
                         tool_results=tool_results,
-                        success=False,
+                        success=True,
                         session_id=session_id,
                     )
+                    _record_result(root_span, result)
+                    self._hooks.invoke(
+                        AgentFinished(result=result, session_id=session_id)
+                    )
+                    return result
 
-                # ── 2. Prepare context ─────────────────────────────────────
-                if self._conversation_manager is not None:
-                    context = self._conversation_manager.prepare(history)
-                else:
-                    context = list(history)
-
-                # ── 3. Call model ──────────────────────────────────────────
+            except Exception as error:
+                state.step_count += 1
+                root_span.record_exception(error)
+                root_span.set_status(StatusCode.ERROR, str(error))
                 self._hooks.invoke(
-                    BeforeModelCall(messages=context, step=state.step_count)
-                )
-
-                model_call_start = time.monotonic()
-                response: Message = await self._retry_strategy.execute(
-                    lambda: self._invoke_model(context)
-                )
-                model_call_ms = (time.monotonic() - model_call_start) * 1000
-
-                state.model_call_count += 1
-                state.input_tokens += _extract_tokens(response, "input_tokens")
-                state.output_tokens += _extract_tokens(response, "output_tokens")
-
-                self._hooks.invoke(
-                    AfterModelCall(
-                        message=response,
-                        step=state.step_count,
-                        duration_ms=model_call_ms,
+                    AgentFailed(
+                        error=error, step=state.step_count, session_id=session_id
                     )
                 )
-
-                history.append(response)
-                self._hooks.invoke(
-                    MessageAdded(message=response, step=state.step_count)
-                )
-
-                # ── 4. Handle tool calls ───────────────────────────────────
-                pending_tool_uses = _extract_tool_uses(response)
-
-                if pending_tool_uses:
-                    for tool_use in pending_tool_uses:
-                        tool_result = await self._execute_tool(
-                            tool_use=tool_use,
-                            step=state.step_count,
-                        )
-                        tool_uses.append(tool_use)
-                        tool_results.append(tool_result)
-                        state.tool_call_count += 1
-
-                        result_message = _tool_result_to_message(tool_result)
-                        history.append(result_message)
-                        self._hooks.invoke(
-                            MessageAdded(
-                                message=result_message, step=state.step_count
-                            )
-                        )
-
-                    state.step_count += 1
-                    continue
-
-                # ── 5. Final answer ────────────────────────────────────────
-                state.step_count += 1
                 result = self._build_result(
-                    stop_reason=StopReason.END_TURN,
-                    message=response.content,
+                    stop_reason=StopReason.ERROR,
+                    message=str(error),
                     state=state,
                     tool_uses=tool_uses,
                     tool_results=tool_results,
-                    success=True,
+                    success=False,
+                    error=error,
                     session_id=session_id,
                 )
-                self._hooks.invoke(
-                    AgentFinished(result=result, session_id=session_id)
-                )
+                _record_result(root_span, result)
                 return result
-
-        except Exception as error:
-            state.step_count += 1
-            self._hooks.invoke(
-                AgentFailed(
-                    error=error, step=state.step_count, session_id=session_id
-                )
-            )
-            return self._build_result(
-                stop_reason=StopReason.ERROR,
-                message=str(error),
-                state=state,
-                tool_uses=tool_uses,
-                tool_results=tool_results,
-                success=False,
-                error=error,
-                session_id=session_id,
-            )
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -237,7 +264,7 @@ class AgentLoop:
     async def _invoke_model(self, messages: list[Message]) -> Message:
         """Call the model, supporting both sync and async ChatModel."""
         if hasattr(self._model, "invoke"):
-            result = self._model.invoke(messages)
+            result = self._model.invoke(messages, tools=list(self._tools.values()))
             if asyncio.iscoroutine(result):
                 return await result
             return result
@@ -250,6 +277,7 @@ class AgentLoop:
         *,
         tool_use: ToolUse,
         step: int,
+        state: RunState,
     ) -> ToolResult:
         """Look up and execute a tool, returning a ToolResult."""
         self._hooks.invoke(BeforeToolCall(tool_use=tool_use, step=step))
@@ -258,33 +286,47 @@ class AgentLoop:
 
         tool = self._tools.get(tool_use.name)
 
-        if tool is None:
-            tool_result = ToolResult(
-                tool_use_id=tool_use.tool_use_id,
-                status="error",
-                content=f"Tool {tool_use.name!r} is not registered.",
-            )
-        else:
-            try:
-                raw = tool.call(tool_use.input)
-                if asyncio.iscoroutine(raw):
-                    raw = await raw
-                tool_result = ToolResult(
-                    tool_use_id=tool_use.tool_use_id,
-                    status="success",
-                    content=json.dumps(raw) if not isinstance(raw, str) else raw,
-                )
-            except Exception as exc:
-                logger.debug(
-                    "tool=%s error=%r | tool execution failed", tool_use.name, exc
-                )
+        with _TRACER.start_as_current_span(
+            f"execute_tool {tool_use.name}",
+            attributes={
+                _semconv.TOOL_NAME: tool_use.name,
+                _semconv.TOOL_CALL_ID: tool_use.tool_use_id,
+                _semconv.STEP: step,
+            },
+        ) as tool_span:
+            if tool is None:
                 tool_result = ToolResult(
                     tool_use_id=tool_use.tool_use_id,
                     status="error",
-                    content=str(exc),
+                    content=f"Tool {tool_use.name!r} is not registered.",
                 )
+            else:
+                try:
+                    raw = tool.call(tool_use.input)
+                    if asyncio.iscoroutine(raw):
+                        raw = await raw
+                    tool_result = ToolResult(
+                        tool_use_id=tool_use.tool_use_id,
+                        status="success",
+                        content=json.dumps(raw) if not isinstance(raw, str) else raw,
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "tool=%s error=%r | tool execution failed", tool_use.name, exc
+                    )
+                    tool_result = ToolResult(
+                        tool_use_id=tool_use.tool_use_id,
+                        status="error",
+                        content=str(exc),
+                    )
+
+            if tool_result.status == "error":
+                tool_span.set_status(StatusCode.ERROR, tool_result.content)
 
         tool_call_ms = (time.monotonic() - tool_call_start) * 1000
+        state.record_tool_call(
+            tool_use.name, tool_call_ms, error=tool_result.status == "error"
+        )
         self._hooks.invoke(
             AfterToolCall(
                 tool_use=tool_use,
@@ -313,7 +355,10 @@ class AgentLoop:
             tool_calls=state.tool_call_count,
             input_tokens=state.input_tokens,
             output_tokens=state.output_tokens,
+            cache_read_tokens=state.cache_read_tokens,
+            cache_write_tokens=state.cache_write_tokens,
             duration_ms=state.elapsed_seconds() * 1000,
+            per_tool=state.per_tool,
         )
         return AgentResult(
             stop_reason=stop_reason,
@@ -329,6 +374,38 @@ class AgentLoop:
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
+
+
+def _record_result(span: trace.Span, result: AgentResult) -> None:
+    """Stamp run-level metrics onto the root span."""
+    metrics = result.metrics
+    span.set_attributes(
+        {
+            _semconv.STOP_REASON: result.stop_reason.value,
+            _semconv.STEPS: metrics.steps,
+            _semconv.MODEL_CALLS: metrics.model_calls,
+            _semconv.TOOL_CALLS: metrics.tool_calls,
+            _semconv.INPUT_TOKENS: metrics.input_tokens,
+            _semconv.OUTPUT_TOKENS: metrics.output_tokens,
+        }
+    )
+
+
+def _record_usage(span: trace.Span, message: Message) -> None:
+    """Stamp token usage from the model response onto a chat span."""
+    usage = message.metadata.get("usage", {})
+    if not isinstance(usage, dict) or not usage:
+        return
+    span.set_attributes(
+        {
+            _semconv.INPUT_TOKENS: usage.get("input_tokens", 0),
+            _semconv.OUTPUT_TOKENS: usage.get("output_tokens", 0),
+        }
+    )
+    if "cache_read_tokens" in usage:
+        span.set_attribute(_semconv.CACHE_READ_TOKENS, usage["cache_read_tokens"])
+    if "cache_write_tokens" in usage:
+        span.set_attribute(_semconv.CACHE_WRITE_TOKENS, usage["cache_write_tokens"])
 
 
 def _limit_to_stop_reason(limit: str) -> StopReason:

@@ -17,8 +17,7 @@ if TYPE_CHECKING:
 class TokenCounter(Protocol):
     """Counts tokens for a single message."""
 
-    def count_message(self, message: Message) -> int:
-        ...
+    def count_message(self, message: Message) -> int: ...
 
 
 class ConversationManager(Protocol):
@@ -33,8 +32,7 @@ class ConversationManager(Protocol):
         self,
         messages: list[Message],
         current_input: str | None = None,
-    ) -> list[Message]:
-        ...
+    ) -> list[Message]: ...
 
 
 # ---------------------------------------------------------------------------
@@ -214,8 +212,7 @@ class TokenBudgetManager:
                 preserved.append(message)
 
         candidates = [
-            m for m in messages[candidate_start:]
-            if m.id not in preserved_ids
+            m for m in messages[candidate_start:] if m.id not in preserved_ids
         ]
         return preserved, candidates
 
@@ -415,14 +412,15 @@ class SummarizingManager:
         recent = messages[-self._keep_recent :]
 
         prev_summary_index = self._latest_summary_index(old)
-        prev_summary = old[prev_summary_index] if prev_summary_index is not None else None
+        prev_summary = (
+            old[prev_summary_index] if prev_summary_index is not None else None
+        )
         candidates = (
             old[prev_summary_index + 1 :] if prev_summary_index is not None else old
         )
         pinned_old = [m for m in old if _is_pinned(m) and m is not prev_summary]
         summarizable = [
-            m for m in candidates
-            if not _is_pinned(m) and not self._is_summary(m)
+            m for m in candidates if not _is_pinned(m) and not self._is_summary(m)
         ]
 
         if not summarizable:
