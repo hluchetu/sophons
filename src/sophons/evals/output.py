@@ -41,6 +41,8 @@ class OutputEvaluator:
         reference: str | None = None,
         tool_calls: list[str] | None = None,
         expected_tools: list[str] | None = None,
+        expected_tool_calls: list[dict[str, Any]] | None = None,
+        actual_tool_calls: list[dict[str, Any]] | None = None,
     ) -> EvalResult:
         scores = [
             await judge_dimension(

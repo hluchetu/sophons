@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from typing import Literal
+from typing import Any, Literal
 
 from sophons.evals.base import EvalResult, EvalScore
 
@@ -34,6 +34,8 @@ class TrajectoryEvaluator:
         reference: str | None = None,
         tool_calls: list[str] | None = None,
         expected_tools: list[str] | None = None,
+        expected_tool_calls: list[dict[str, Any]] | None = None,
+        actual_tool_calls: list[dict[str, Any]] | None = None,
     ) -> EvalResult:
         if expected_tools is None:
             raise ValueError(
