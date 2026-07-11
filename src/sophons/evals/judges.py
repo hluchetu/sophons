@@ -7,10 +7,13 @@ from typing import Any
 from sophons.evals.base import EvalScore
 from sophons.models import Message
 
+
+_JUDGE_PROMPT_VERSION = "v0"
+
 _JUDGE_SYSTEM = (
     "You are a strict evaluator. Follow the grading steps exactly. "
     "Respond with only a JSON object, no prose, no code fences: "
-    '{"passed": true or false, "score": <number 0.0-1.0>, "reason": "<one sentence>"}'
+    '{"reason": "<one sentence>", "passed": true or false, "score": <number 0.0-1.0>}'
 )
 
 
@@ -24,6 +27,7 @@ async def judge_dimension(
     dimension: str,
     steps: str,
     materials: dict[str, str],
+    metadata: dict[str, Any] | None = None,
 ) -> EvalScore:
     """
     One judge call, one dimension, one verdict.
@@ -48,14 +52,16 @@ async def judge_dimension(
         if asyncio.iscoroutine(response):
             response = await response
         try:
-            return _parse_verdict(dimension, response.content)
+            return _parse_verdict(dimension, response.content, metadata)
         except ValueError as error:
             last_error = error
 
     raise JudgeError(f"judge returned no usable verdict: {last_error}")
 
 
-def _parse_verdict(dimension: str, content: str) -> EvalScore:
+def _parse_verdict(
+    dimension: str, content: str, metadata: dict[str, Any] | None = None
+) -> EvalScore:
     """Parse the judge's JSON reply into an EvalScore. Raises ValueError."""
     text = content.strip()
     if text.startswith("```"):
@@ -73,4 +79,8 @@ def _parse_verdict(dimension: str, content: str) -> EvalScore:
         passed=data["passed"],
         score=min(1.0, max(0.0, score)),
         reason=str(data.get("reason", "")).strip(),
+        metadata={
+            "judge_prompt_version": _JUDGE_PROMPT_VERSION,
+            **(metadata or {}),
+        },
     )

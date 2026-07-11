@@ -7,6 +7,8 @@ from sophons.evals.base import EvalResult, EvalScore
 
 TrajectoryMode = Literal["exact", "in-order", "any-order"]
 
+EVALUATOR_VERSION = "v0"
+
 
 class TrajectoryEvaluator:
     """
@@ -48,12 +50,24 @@ class TrajectoryEvaluator:
 
         found = Counter(expected_tools) & Counter(actual)
         coverage = sum(found.values()) / len(expected_tools) if expected_tools else 1.0
+        missing = list((Counter(expected_tools) - Counter(actual)).elements())
+        extra = list((Counter(actual) - Counter(expected_tools)).elements())
 
         score = EvalScore(
             dimension="trajectory",
             passed=passed,
             score=1.0 if passed else coverage,
             reason=(f"mode={self.mode} expected={expected_tools} actual={actual}"),
+            metadata={
+                "evaluator": "TrajectoryEvaluator",
+                "evaluator_version": EVALUATOR_VERSION,
+                "mode": self.mode,
+                "expected_tools": expected_tools,
+                "actual_tools": actual,
+                "missing_tools": missing,
+                "extra_tools": extra,
+                "coverage": coverage,
+            },
         )
         return EvalResult(question=question, answer=answer, scores=[score])
 

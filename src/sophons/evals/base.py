@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable, Any
 
 
 @dataclass(frozen=True, slots=True)
@@ -12,6 +12,7 @@ class EvalScore:
     passed: bool  # the binary verdict — gates and CI read this
     score: float  # 0.0 to 1.0 — dashboards and trends read this
     reason: str  # why — the first thing you read when it fails
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

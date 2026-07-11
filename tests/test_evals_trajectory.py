@@ -53,6 +53,41 @@ async def test_missing_expected_tools_raises() -> None:
 
 
 @pytest.mark.asyncio
+async def test_metadata_names_missing_and_extra_tools() -> None:
+    evaluator = TrajectoryEvaluator(mode="any-order")
+
+    result = await evaluator.evaluate(
+        "q",
+        "a",
+        tool_calls=["search_docs", "delete_user"],
+        expected_tools=["search_docs", "create_ticket"],
+    )
+
+    meta = result.scores[0].metadata
+    assert meta["missing_tools"] == ["create_ticket"]
+    assert meta["extra_tools"] == ["delete_user"]
+    assert meta["coverage"] == pytest.approx(0.5)
+    assert meta["mode"] == "any-order"
+    assert meta["evaluator"] == "TrajectoryEvaluator"
+
+
+@pytest.mark.asyncio
+async def test_metadata_respects_duplicate_counts() -> None:
+    evaluator = TrajectoryEvaluator(mode="any-order")
+
+    result = await evaluator.evaluate(
+        "q",
+        "a",
+        tool_calls=["search"],
+        expected_tools=["search", "search"],
+    )
+
+    meta = result.scores[0].metadata
+    assert meta["missing_tools"] == ["search"]  # one of the two still owed
+    assert meta["extra_tools"] == []
+
+
+@pytest.mark.asyncio
 async def test_no_tool_calls_defaults_to_empty() -> None:
     evaluator = TrajectoryEvaluator(mode="any-order")
 

@@ -20,6 +20,8 @@ a refusal, or filler.
 3. passed = true only if a person asking the question would consider it \
 answered. score = how directly the answer addresses the question."""
 
+EVALUATOR_VERSION = "v0"
+
 
 class OutputEvaluator:
     """
@@ -46,6 +48,12 @@ class OutputEvaluator:
                 dimension="relevancy",
                 steps=_RELEVANCY_STEPS,
                 materials={"question": question, "answer": answer},
+                metadata={
+                    "evaluator": "OutputEvaluator",
+                    "evaluator_version": EVALUATOR_VERSION,
+                    "input_fields": ["question", "answer"],
+                    "reference_provided": reference is not None,
+                },
             )
         ]
         if reference is not None:
@@ -58,6 +66,12 @@ class OutputEvaluator:
                         "question": question,
                         "answer": answer,
                         "reference": reference,
+                    },
+                    metadata={
+                        "evaluator": "OutputEvaluator",
+                        "evaluator_version": EVALUATOR_VERSION,
+                        "input_fields": ["question", "answer", "reference"],
+                        "reference_provided": True,
                     },
                 )
             )

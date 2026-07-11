@@ -12,6 +12,8 @@ hedged answer does not count.
 3. If a reference answer is provided, use it as the bar for "fully".
 4. passed = true only for complete success. score = 1.0 if passed else 0.0."""
 
+EVALUATOR_VERSION = "v0"
+
 
 class GoalEvaluator:
     """
@@ -42,5 +44,10 @@ class GoalEvaluator:
             dimension="goal",
             steps=_GOAL_STEPS,
             materials=materials,
+            metadata={
+                "evaluator": "GoalEvaluator",
+                "evaluator_version": EVALUATOR_VERSION,
+                "reference_provided": reference is not None,
+            },
         )
         return EvalResult(question=question, answer=answer, scores=[score])
