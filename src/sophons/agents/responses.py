@@ -13,6 +13,7 @@ class StopReason(str, Enum):
     MAX_TOKENS = "max_tokens"  # token budget exhausted
     MAX_RUNTIME = "max_runtime"  # time limit hit
     CANCELLED = "cancelled"  # cancelled from outside
+    GUARDRAIL = "guardrail"  # a guardrail blocked the run
     ERROR = "error"  # unrecoverable failure
 
 

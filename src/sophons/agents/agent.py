@@ -12,6 +12,7 @@ from sophons.agents.responses import AgentResult
 from sophons.agents.retry import RetryStrategy, exponential_backoff
 from sophons.agents.session import InMemorySessionManager, SessionManager
 from sophons.agents.state import RunLimits
+from sophons.guardrails import Guardrail, GuardrailChain
 from sophons.tools.base import AsyncTool, Tool
 
 logger = logging.getLogger(__name__)
@@ -63,9 +64,12 @@ class Agent:
         session_manager: SessionManager | None = None,
         retry_strategy: RetryStrategy | None = None,
         limits: RunLimits | None = None,
+        guardrails: GuardrailChain | list[Guardrail] | None = None,
     ) -> None:
         self._session_manager = session_manager or InMemorySessionManager()
         self._hooks = hooks or HookRegistry()
+        if isinstance(guardrails, list):
+            guardrails = GuardrailChain(guardrails)
         self._loop = AgentLoop(
             model=model,
             tools=tools,
@@ -74,6 +78,7 @@ class Agent:
             conversation_manager=conversation_manager,
             retry_strategy=retry_strategy or exponential_backoff(),
             limits=limits,
+            guardrails=guardrails,
         )
 
     # ------------------------------------------------------------------

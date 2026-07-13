@@ -31,6 +31,7 @@ from sophons.agents.responses import (
 )
 from sophons.agents.retry import RetryStrategy, no_retry
 from sophons.agents.state import RunLimits, RunState
+from sophons.guardrails import GuardrailChain, GuardrailContext
 from sophons.models.messages import Message
 from sophons.observability import _semconv
 from sophons.tools.base import AsyncTool, Tool
@@ -80,6 +81,7 @@ class AgentLoop:
         conversation_manager: ConversationManager | None = None,
         retry_strategy: RetryStrategy | None = None,
         limits: RunLimits | None = None,
+        guardrails: GuardrailChain | None = None,
     ) -> None:
         self._model = model
         self._tools: dict[str, Tool | AsyncTool] = {t.name: t for t in (tools or [])}
@@ -88,6 +90,7 @@ class AgentLoop:
         self._conversation_manager = conversation_manager
         self._retry_strategy = retry_strategy or no_retry()
         self._limits = limits or RunLimits()
+        self._guardrails = guardrails
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -136,6 +139,34 @@ class AgentLoop:
             "invoke_agent", attributes=root_attributes
         ) as root_span:
             try:
+                # ── 0. Input guardrails ────────────────────────────────
+                if self._guardrails is not None:
+                    decision = await self._guardrails.check(
+                        input,
+                        context=GuardrailContext(
+                            boundary="input", session_id=session_id
+                        ),
+                    )
+                    if not decision.allowed:
+                        result = self._build_result(
+                            stop_reason=StopReason.GUARDRAIL,
+                            message=decision.message
+                            or "This request was blocked by a guardrail.",
+                            state=state,
+                            tool_uses=tool_uses,
+                            tool_results=tool_results,
+                            success=False,
+                            session_id=session_id,
+                        )
+                        _record_result(root_span, result)
+                        return result
+                    if decision.action == "transform":
+                        history[-1] = Message(
+                            role="user",
+                            content=str(decision.transformed),
+                            id=user_message.id,
+                        )
+
                 while True:
                     # ── 1. Check limits ────────────────────────────────────
                     exceeded = state.exceeds(self._limits)
@@ -220,9 +251,32 @@ class AgentLoop:
 
                     # ── 5. Final answer ────────────────────────────────────
                     state.step_count += 1
+                    final_message = response.content
+                    if self._guardrails is not None:
+                        decision = await self._guardrails.check(
+                            final_message,
+                            context=GuardrailContext(
+                                boundary="output", session_id=session_id
+                            ),
+                        )
+                        if not decision.allowed:
+                            result = self._build_result(
+                                stop_reason=StopReason.GUARDRAIL,
+                                message=decision.message
+                                or "The response was blocked by a guardrail.",
+                                state=state,
+                                tool_uses=tool_uses,
+                                tool_results=tool_results,
+                                success=False,
+                                session_id=session_id,
+                            )
+                            _record_result(root_span, result)
+                            return result
+                        if decision.action == "transform":
+                            final_message = str(decision.transformed)
                     result = self._build_result(
                         stop_reason=StopReason.END_TURN,
-                        message=response.content,
+                        message=final_message,
                         state=state,
                         tool_uses=tool_uses,
                         tool_results=tool_results,
@@ -294,15 +348,37 @@ class AgentLoop:
                 _semconv.STEP: step,
             },
         ) as tool_span:
+            tool_args = tool_use.input
+            blocked = None
+            if tool is not None and self._guardrails is not None:
+                decision = await self._guardrails.check(
+                    tool_args,
+                    context=GuardrailContext(
+                        boundary="tool", tool_name=tool_use.name
+                    ),
+                )
+                if not decision.allowed:
+                    blocked = decision
+                elif decision.action == "transform":
+                    tool_args = decision.transformed
+
             if tool is None:
                 tool_result = ToolResult(
                     tool_use_id=tool_use.tool_use_id,
                     status="error",
                     content=f"Tool {tool_use.name!r} is not registered.",
                 )
+            elif blocked is not None:
+                tool_result = ToolResult(
+                    tool_use_id=tool_use.tool_use_id,
+                    status="error",
+                    content=(
+                        f"Tool call blocked by guardrail: {blocked.reason}"
+                    ),
+                )
             else:
                 try:
-                    raw = tool.call(tool_use.input)
+                    raw = tool.call(tool_args)
                     if asyncio.iscoroutine(raw):
                         raw = await raw
                     tool_result = ToolResult(
