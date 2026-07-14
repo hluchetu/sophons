@@ -13,6 +13,7 @@ from sophons.agents.retry import RetryStrategy, exponential_backoff
 from sophons.agents.session import InMemorySessionManager, SessionManager
 from sophons.agents.state import RunLimits
 from sophons.guardrails import Guardrail, GuardrailChain
+from sophons.guardrails.approval import Approver
 from sophons.tools.base import AsyncTool, Tool
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,7 @@ class Agent:
         retry_strategy: RetryStrategy | None = None,
         limits: RunLimits | None = None,
         guardrails: GuardrailChain | list[Guardrail] | None = None,
+        approver: Approver | None = None,
     ) -> None:
         self._session_manager = session_manager or InMemorySessionManager()
         self._hooks = hooks or HookRegistry()
@@ -79,6 +81,7 @@ class Agent:
             retry_strategy=retry_strategy or exponential_backoff(),
             limits=limits,
             guardrails=guardrails,
+            approver=approver,
         )
 
     # ------------------------------------------------------------------

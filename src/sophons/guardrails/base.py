@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, runtime_checkable
 
-GuardrailAction = Literal["allow", "block", "transform"]
+GuardrailAction = Literal["allow", "block", "transform", "confirm"]
 
 Boundary = Literal["input", "tool", "output"]
 
@@ -30,7 +30,9 @@ class GuardrailDecision:
 
     @property
     def allowed(self) -> bool:
-        return self.action != "block"
+        # Explicit allowlist of permissive actions: "confirm" is NOT allowed
+        # until an approver upgrades it — fail-safe by construction.
+        return self.action in ("allow", "transform")
 
     @classmethod
     def allow(cls) -> GuardrailDecision:
@@ -43,6 +45,11 @@ class GuardrailDecision:
     @classmethod
     def transform(cls, value: Any, *, reason: str) -> GuardrailDecision:
         return cls(action="transform", transformed=value, reason=reason)
+
+    @classmethod
+    def confirm(cls, reason: str, *, message: str | None = None) -> GuardrailDecision:
+        """A human must decide. Fail-safe: treated as block until approved."""
+        return cls(action="confirm", reason=reason, message=message)
 
 
 @runtime_checkable

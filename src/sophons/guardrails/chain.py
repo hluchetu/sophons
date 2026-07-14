@@ -57,9 +57,11 @@ class GuardrailChain:
 
             if decision.action == "transform" and self.mode == "enforce":
                 current = decision.transformed
-            elif decision.action == "block" and self.mode == "enforce":
+            elif decision.action in ("block", "confirm") and self.mode == "enforce":
+                # Both stop the chain: block is final; confirm is "not
+                # allowed until an approver upgrades it" — the loop decides.
                 return GuardrailDecision(
-                    action="block",
+                    action=decision.action,
                     reason=decision.reason,
                     message=decision.message,
                     metadata={"guardrail": guardrail.name, "decisions": records},

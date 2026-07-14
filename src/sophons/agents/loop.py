@@ -32,6 +32,7 @@ from sophons.agents.responses import (
 from sophons.agents.retry import RetryStrategy, no_retry
 from sophons.agents.state import RunLimits, RunState
 from sophons.guardrails import GuardrailChain, GuardrailContext
+from sophons.guardrails.approval import ApprovalRequest, Approver
 from sophons.models.messages import Message
 from sophons.observability import _semconv
 from sophons.tools.base import AsyncTool, Tool
@@ -82,6 +83,7 @@ class AgentLoop:
         retry_strategy: RetryStrategy | None = None,
         limits: RunLimits | None = None,
         guardrails: GuardrailChain | None = None,
+        approver: Approver | None = None,
     ) -> None:
         self._model = model
         self._tools: dict[str, Tool | AsyncTool] = {t.name: t for t in (tools or [])}
@@ -91,6 +93,7 @@ class AgentLoop:
         self._retry_strategy = retry_strategy or no_retry()
         self._limits = limits or RunLimits()
         self._guardrails = guardrails
+        self._approver = approver
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -350,6 +353,7 @@ class AgentLoop:
         ) as tool_span:
             tool_args = tool_use.input
             blocked = None
+            denial_content: str | None = None
             if tool is not None and self._guardrails is not None:
                 decision = await self._guardrails.check(
                     tool_args,
@@ -357,7 +361,41 @@ class AgentLoop:
                         boundary="tool", tool_name=tool_use.name
                     ),
                 )
-                if not decision.allowed:
+                if decision.action == "confirm":
+                    if self._approver is None:
+                        blocked = decision
+                        denial_content = (
+                            "Tool call requires approval but no approver is "
+                            f"configured: {decision.reason}"
+                        )
+                    else:
+                        approval_start = time.monotonic()
+                        approval = await self._approver.approve(
+                            ApprovalRequest(
+                                boundary="tool",
+                                reason=decision.reason,
+                                value=tool_args,
+                                tool_name=tool_use.name,
+                            )
+                        )
+                        tool_span.add_event(
+                            "approval",
+                            {
+                                "sophons.approval.approved": approval.approved,
+                                "sophons.approval.approver": approval.approver,
+                                "sophons.approval.wait_ms": (
+                                    time.monotonic() - approval_start
+                                )
+                                * 1000,
+                            },
+                        )
+                        if not approval.approved:
+                            blocked = decision
+                            denial_content = (
+                                f"Tool call denied by {approval.approver}"
+                                + (f": {approval.note}" if approval.note else "")
+                            )
+                elif not decision.allowed:
                     blocked = decision
                 elif decision.action == "transform":
                     tool_args = decision.transformed
@@ -372,9 +410,8 @@ class AgentLoop:
                 tool_result = ToolResult(
                     tool_use_id=tool_use.tool_use_id,
                     status="error",
-                    content=(
-                        f"Tool call blocked by guardrail: {blocked.reason}"
-                    ),
+                    content=denial_content
+                    or f"Tool call blocked by guardrail: {blocked.reason}",
                 )
             else:
                 try:

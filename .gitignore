@@ -6,6 +6,7 @@ __pycache__/
 docs/agents_architecture.md
 docs/evals_architecture.md
 docs/guardrails_architecture.md
+docs/hitl_architecture.md
 docs/integrations_architecture.md
 docs/llm_architecture.md
 docs/loaders_architecture.md
