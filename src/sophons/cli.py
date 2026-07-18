@@ -1,14 +1,21 @@
-"""Terminal chat for sophons agents — rich panels, prompt history, spinner.
+"""Terminal UI for sophons examples and agents — panels, history, spinner.
 
 Requires the ``cli`` extra: ``pip install 'sophons[cli]'``.
 
-Two entry points:
+Primitives (the house style, one panel per event):
+
+    from sophons.cli import ui
+
+    ui.header("hybrid.py", subtitle="bm25 vs semantic vs RRF")
+    ui.user("How much is FEE-WDR-021?")
+    ui.tool("bm25: #1 · semantic: #3 · hybrid: #2")
+    ui.agent("The fee is KES 110.", footer="sources: fees.md")
+
+Loops built on the primitives:
 
 - ``chat(title=..., answer=...)`` — bring your own answer function.
-  ``answer(question)`` returns ``(text, footer)``; the footer shows in
-  the agent panel (sources, metrics, anything).
-- ``chat_with_agent(agent, title=...)`` — wires a sophons Agent in
-  directly; the footer shows run metrics automatically.
+- ``chat_with_agent(agent, title=...)`` — wires a sophons Agent in;
+  the footer shows run metrics automatically.
 """
 
 from __future__ import annotations
@@ -25,21 +32,92 @@ _INSTALL_HINT = (
 )
 
 
-def _ui():
-    """Import the UI deps lazily, with the house install hint."""
-    try:
-        from prompt_toolkit import PromptSession
-        from prompt_toolkit.history import FileHistory
-        from prompt_toolkit.styles import Style
-        from rich.console import Console
-        from rich.markdown import Markdown
+class UI:
+    """The panel vocabulary of the sophons terminal.
+
+    Lazy: importing this module costs nothing; the first call pulls in
+    rich (raising the friendly install hint if it's missing). Output
+    degrades to plain text automatically when piped.
+    """
+
+    _BLUE = "#5f87ff"
+    _GREEN = "#2dba4e"
+    _YELLOW = "#e5c07b"
+    _MAGENTA = "#c678dd"
+
+    def __init__(self) -> None:
+        self._console: Any = None
+
+    @property
+    def console(self) -> Any:
+        if self._console is None:
+            try:
+                from rich.console import Console
+            except ImportError as exc:
+                raise MissingDependencyError(
+                    _INSTALL_HINT, details={"extra": "cli"}
+                ) from exc
+            self._console = Console()
+        return self._console
+
+    def _panel(
+        self, body: Any, *, title: str, color: str, footer: str = ""
+    ) -> None:
         from rich.panel import Panel
+
+        self.console.print(
+            Panel(
+                body,
+                title=f"[bold {color}]{title}[/bold {color}]",
+                subtitle=f"[dim]{footer}[/dim]" if footer else None,
+                border_style=color,
+                padding=(0, 1),
+            )
+        )
+
+    def header(self, title: str, *, subtitle: str = "") -> None:
+        from rich.panel import Panel
+
+        self.console.print()
+        self.console.print(
+            Panel.fit(
+                f"[bold white]{title}[/bold white]  [dim]{subtitle}[/dim]",
+                border_style="bright_black",
+                padding=(0, 2),
+            )
+        )
+        self.console.print()
+
+    def user(self, text: str) -> None:
         from rich.text import Text
-    except ImportError as exc:
-        raise MissingDependencyError(
-            _INSTALL_HINT, details={"extra": "cli"}
-        ) from exc
-    return PromptSession, FileHistory, Style, Console, Markdown, Panel, Text
+
+        self._panel(Text(text), title="You", color=self._BLUE)
+
+    def thinking(self, text: str) -> None:
+        from rich.text import Text
+
+        self._panel(Text(text), title="Thinking", color=self._MAGENTA)
+
+    def tool(self, text: str) -> None:
+        from rich.text import Text
+
+        self._panel(Text(text), title="Tool", color=self._YELLOW)
+
+    def agent(self, text: str, *, footer: str = "") -> None:
+        from rich.markdown import Markdown
+
+        self._panel(Markdown(text), title="Agent", color=self._GREEN, footer=footer)
+
+    def status(self, text: str) -> Any:
+        """Spinner context manager: ``with ui.status("Thinking..."):``"""
+        return self.console.status(f"[dim]{text}[/dim]", spinner="dots")
+
+    def note(self, text: str) -> None:
+        """Dim one-liner between panels (counts, timings, asides)."""
+        self.console.print(f"[dim]{text}[/dim]")
+
+
+ui = UI()
 
 
 def chat(
@@ -51,28 +129,21 @@ def chat(
 ) -> None:
     """Run a chat loop in the terminal.
 
-    Args:
-        title:        Shown in the header panel.
-        subtitle:     Dim text next to the title (model name, mode, ...).
-        answer:       Called with each question; returns (text, footer).
-        history_name: Prompt history file name under the home directory —
-                      share one across runs to get up-arrow recall.
+    ``answer(question)`` returns ``(text, footer)``; the footer shows in
+    the agent panel (sources, metrics, anything).
     """
-    PromptSession, FileHistory, Style, Console, Markdown, Panel, Text = _ui()
+    try:
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.history import FileHistory
+        from prompt_toolkit.styles import Style
+    except ImportError as exc:
+        raise MissingDependencyError(
+            _INSTALL_HINT, details={"extra": "cli"}
+        ) from exc
 
-    console = Console()
-    style = Style.from_dict({"prompt": "bold #5f87ff"})
-
-    console.print()
-    console.print(
-        Panel.fit(
-            f"[bold white]{title}[/bold white]  [dim]{subtitle}[/dim]\n"
-            "[dim]Type a question. [bold]exit[/bold] or Ctrl+C to quit.[/dim]",
-            border_style="bright_black",
-            padding=(0, 2),
-        )
-    )
-    console.print()
+    style = Style.from_dict({"prompt": f"bold {UI._BLUE}"})
+    ui.header(title, subtitle=subtitle)
+    ui.note("Type a question. exit or Ctrl+C to quit.")
 
     session = PromptSession(
         history=FileHistory(str(Path.home() / f".{history_name}")),
@@ -83,42 +154,27 @@ def chat(
         try:
             question = session.prompt("  You › ", style=style).strip()
         except (KeyboardInterrupt, EOFError):
-            console.print("\n[dim]Goodbye.[/dim]")
+            ui.note("Goodbye.")
             break
         if not question:
             continue
         if question.lower() in {"exit", "quit", "/exit", "/quit"}:
-            console.print("[dim]Goodbye.[/dim]")
+            ui.note("Goodbye.")
             break
 
-        console.print()
-        console.print(
-            Panel(
-                Text(question),
-                title="[bold #5f87ff]You[/bold #5f87ff]",
-                border_style="#5f87ff",
-                padding=(0, 1),
-            )
-        )
-        console.print()
+        ui.console.print()
+        ui.user(question)
+        ui.console.print()
 
         try:
-            with console.status("[dim]Thinking...[/dim]", spinner="dots"):
+            with ui.status("Thinking..."):
                 text, footer = answer(question)
-            console.print(
-                Panel(
-                    Markdown(text),
-                    title="[bold #2dba4e]Agent[/bold #2dba4e]",
-                    subtitle=f"[dim]{footer}[/dim]",
-                    border_style="#2dba4e",
-                    padding=(0, 1),
-                )
-            )
-            console.print()
+            ui.agent(text, footer=footer)
+            ui.console.print()
         except KeyboardInterrupt:
-            console.print("\n[dim]Cancelled.[/dim]\n")
+            ui.note("Cancelled.")
         except Exception as exc:  # surface, keep chatting
-            console.print(f"\n[bold red]Error:[/bold red] {exc}\n")
+            ui.console.print(f"\n[bold red]Error:[/bold red] {exc}\n")
 
 
 def chat_with_agent(
@@ -140,9 +196,4 @@ def chat_with_agent(
         )
         return result.message, footer
 
-    chat(
-        title=title,
-        subtitle=subtitle,
-        answer=answer,
-        history_name=history_name,
-    )
+    chat(title=title, subtitle=subtitle, answer=answer, history_name=history_name)
