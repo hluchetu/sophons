@@ -16,6 +16,7 @@ Implemented so far:
 - `Loader` / `AsyncLoader`
 - `Splitter`
 - `Tool` / `AsyncTool`
+- `BM25Retriever`, `SemanticRetriever`, `HybridRetriever`, `MultiQueryRetriever`
 
 ## What Sophons Provides
 
@@ -89,16 +90,15 @@ That means the same retriever can be used in different places:
 - An agent can expose a retriever as a tool.
 - A framework adapter can wrap the retriever for OpenAI, Strands, LangChain-style APIs, or another SDK.
 
-The first retriever layer will focus on the common foundation:
+The first retriever layer includes the common foundation:
 
 - Vector retrieval
 - BM25 lexical retrieval
 - Hybrid retrieval
-- Parent document retrieval
+- Multi-query retrieval
 
 More advanced retrievers can wrap or combine those foundations:
 
-- Multi-query retrieval
 - Contextual compression
 - Self-query retrieval
 - Reranking
