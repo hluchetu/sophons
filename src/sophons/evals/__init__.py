@@ -1,4 +1,5 @@
 from sophons.evals.base import EvalResult, EvalScore, Evaluator
+from sophons.evals.context_relevance import ContextRelevanceEvaluator
 from sophons.evals.datasets import EvalCase, EvalDataset
 from sophons.evals.faithfulness import FaithfulnessEvaluator
 from sophons.evals.goal import GoalEvaluator
@@ -18,6 +19,7 @@ __all__ = [
     "EvalRunner",
     "EvalScore",
     "Evaluator",
+    "ContextRelevanceEvaluator",
     "FaithfulnessEvaluator",
     "GoalEvaluator",
     "JudgeError",
