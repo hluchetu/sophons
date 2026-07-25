@@ -1,3 +1,5 @@
+from sophons.evals.answer_correctness import AnswerCorrectnessEvaluator
+from sophons.evals.answer_relevance import AnswerRelevanceEvaluator
 from sophons.evals.base import EvalResult, EvalScore, Evaluator
 from sophons.evals.context_relevance import ContextRelevanceEvaluator
 from sophons.evals.datasets import EvalCase, EvalDataset
@@ -11,6 +13,8 @@ from sophons.evals.tool_parameters import ToolParameterEvaluator
 from sophons.evals.trajectory import TrajectoryEvaluator, TrajectoryMode
 
 __all__ = [
+    "AnswerCorrectnessEvaluator",
+    "AnswerRelevanceEvaluator",
     "CaseResult",
     "EvalCase",
     "EvalDataset",
