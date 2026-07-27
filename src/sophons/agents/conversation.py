@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -20,6 +21,56 @@ class TokenCounter(Protocol):
     def count_message(self, message: Message) -> int: ...
 
 
+class ApproximateTokenCounter:
+    """
+    Estimates tokens by character count, without a tokenizer.
+
+    Exact counting needs the model's own tokenizer, which means a provider
+    dependency or a network round trip. For deciding how much history fits
+    in a budget, an estimate is enough — budgets are set below the real
+    limit anyway, so the cost of being slightly wrong is a few wasted
+    tokens rather than a rejected request.
+
+    It is deliberately named "approximate" so nobody mistakes it for exact.
+    Under-counting is the dangerous direction, so the defaults lean high:
+    tool calls in metadata are counted (they are sent to the model and are
+    easy to forget), and a per-message overhead covers the role and
+    delimiters every provider adds.
+
+    Args:
+        chars_per_token:      Average characters per token. 4.0 is the usual
+                              rule of thumb for English prose; code and
+                              non-Latin scripts pack fewer characters per
+                              token, so lower it if you work in those.
+        per_message_overhead: Tokens charged per message for role and
+                              formatting, independent of content.
+    """
+
+    def __init__(
+        self,
+        chars_per_token: float = 4.0,
+        per_message_overhead: int = 4,
+    ) -> None:
+        if chars_per_token <= 0:
+            raise ValueError("chars_per_token must be greater than 0.")
+        if per_message_overhead < 0:
+            raise ValueError("per_message_overhead must not be negative.")
+        self._chars_per_token = chars_per_token
+        self._per_message_overhead = per_message_overhead
+
+    def count_message(self, message: Message) -> int:
+        characters = len(message.content)
+
+        # Tool calls travel to the model as serialized JSON, so a message
+        # with empty content is not free.
+        for call in _tool_calls(message):
+            characters += len(str(call.get("name", "")))
+            characters += len(str(call.get("input", call.get("arguments", ""))))
+
+        estimate = characters / self._chars_per_token
+        return self._per_message_overhead + math.ceil(estimate)
+
+
 class ConversationManager(Protocol):
     """
     Decides which messages from the full history are passed to the model.
@@ -33,6 +84,27 @@ class ConversationManager(Protocol):
         messages: list[Message],
         current_input: str | None = None,
     ) -> list[Message]: ...
+
+
+class NullConversationManager:
+    """
+    Passes the entire history through untouched.
+
+    This is what an agent does when no manager is configured, but saying it
+    out loud is worth something: unbounded history is a decision with a
+    failure mode, not a neutral default. Every turn is replayed on every
+    later call until the request exceeds the model's context window.
+
+    Use it when conversations are known to be short, or as the base case in
+    a benchmark against a real strategy.
+    """
+
+    def prepare(
+        self,
+        messages: list[Message],
+        current_input: str | None = None,
+    ) -> list[Message]:
+        return messages
 
 
 # ---------------------------------------------------------------------------

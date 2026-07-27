@@ -11,7 +11,9 @@ from __future__ import annotations
 import pytest
 
 from sophons.agents.conversation import (
+    ApproximateTokenCounter,
     ContextBudgetExceededError,
+    NullConversationManager,
     SlidingWindowManager,
     SummarizingManager,
     TokenBudgetManager,
@@ -59,6 +61,68 @@ def tool_exchange(n: int) -> list[Message]:
         ),
         msg("tool", f"result {n}", f"t{n}", tool_use_id=f"c{n}", name="branch_hours"),
     ]
+
+
+# ---------------------------------------------------------------------------
+# NullConversationManager
+# ---------------------------------------------------------------------------
+
+
+def test_null_manager_passes_everything_through():
+    history = [msg("user", f"turn {i}", f"m{i}") for i in range(50)]
+
+    assert NullConversationManager().prepare(history) == history
+
+
+# ---------------------------------------------------------------------------
+# ApproximateTokenCounter
+# ---------------------------------------------------------------------------
+
+
+def test_approximate_counter_scales_with_content():
+    counter = ApproximateTokenCounter(per_message_overhead=0)
+
+    assert counter.count_message(msg("user", "x" * 100, "m0")) == 25
+    assert counter.count_message(msg("user", "x" * 200, "m1")) == 50
+
+
+def test_approximate_counter_charges_per_message_overhead():
+    """An empty message still costs something: role and delimiters are sent."""
+    counter = ApproximateTokenCounter(per_message_overhead=4)
+
+    assert counter.count_message(msg("user", "", "m0")) == 4
+
+
+def test_approximate_counter_counts_tool_calls_in_metadata():
+    """A tool call has empty content but is far from free on the wire."""
+    counter = ApproximateTokenCounter(per_message_overhead=0)
+    call, _ = tool_exchange(1)
+
+    assert counter.count_message(call) > 0
+
+
+def test_approximate_counter_rounds_up():
+    """Rounding down would under-count, which is the dangerous direction."""
+    counter = ApproximateTokenCounter(per_message_overhead=0)
+
+    assert counter.count_message(msg("user", "x" * 5, "m0")) == 2  # 1.25 -> 2
+
+
+def test_approximate_counter_rejects_bad_settings():
+    with pytest.raises(ValueError):
+        ApproximateTokenCounter(chars_per_token=0)
+    with pytest.raises(ValueError):
+        ApproximateTokenCounter(per_message_overhead=-1)
+
+
+def test_approximate_counter_satisfies_token_budget_manager():
+    """The point of shipping it: TokenBudgetManager is now usable as-is."""
+    history = [msg("user", "x" * 400, f"m{i}") for i in range(5)]
+    kept = TokenBudgetManager(
+        max_tokens=250, token_counter=ApproximateTokenCounter()
+    ).prepare(history)
+
+    assert 0 < len(kept) < len(history)
 
 
 # ---------------------------------------------------------------------------

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from sophons.agents.agent import Agent
 from sophons.agents.conversation import (
+    ApproximateTokenCounter,
     ConversationManager,
     ContextBudgetExceededError,
     ManagerPipeline,
+    NullConversationManager,
     SlidingWindowManager,
     SummarizationError,
     SummarizingManager,
@@ -81,7 +83,9 @@ __all__ = [
     "RunState",
     # Conversation
     "ConversationManager",
+    "NullConversationManager",
     "TokenCounter",
+    "ApproximateTokenCounter",
     "SlidingWindowManager",
     "TokenBudgetManager",
     "ToolInteractionCompactor",
