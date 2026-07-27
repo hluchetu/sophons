@@ -495,7 +495,12 @@ class SummarizingManager:
             ),
         ]
         try:
-            response = self._model.chat(prompt_messages)
+            response = self._model.invoke(prompt_messages)
+        except AttributeError:
+            # A model that cannot be called at all is a wiring bug, not a
+            # summarization failure — let it surface instead of being
+            # relabelled as one.
+            raise
         except Exception as exc:
             raise SummarizationError(
                 "Failed to summarize conversation messages."
