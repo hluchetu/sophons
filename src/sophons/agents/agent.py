@@ -207,6 +207,7 @@ class Agent:
         updated.append(Message(role="user", content=user_input))
         if result.message:
             updated.append(Message(role="assistant", content=result.message))
+        updated = _ensure_message_ids(updated)
 
         try:
             await self._session_manager.save(session_id, updated)
@@ -217,3 +218,24 @@ class Agent:
             logger.warning(
                 "session=%s failed to save history: %r", session_id, exc
             )
+
+
+def _ensure_message_ids(messages: list) -> list:
+    """
+    Give every message a stable id before the history becomes durable.
+
+    Ids are assigned at the persistence boundary rather than by each producer:
+    model adapters return messages without one, and the loop's own ids do not
+    reach this point because ``AgentResult`` carries the final text rather than
+    the message objects.
+
+    Without this, stored messages are anonymous — they cannot be joined to a
+    trace span, addressed for edit or delete, or de-duplicated on reload, and a
+    replay would invent a different identity each time. Existing ids are left
+    alone, so they survive the round trip through ``from_dict`` and stay stable
+    across reloads; messages saved before this existed are healed on next write.
+    """
+    return [
+        message if message.id else message.with_id(str(uuid.uuid4()))
+        for message in messages
+    ]
