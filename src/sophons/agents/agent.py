@@ -46,10 +46,15 @@ class Agent:
         result = agent("Hello", session_id="user-123")
 
     Session behaviour:
-        If ``session_manager`` is provided and ``session_id`` is passed to
-        ``run()``, the agent loads prior conversation history before the run
-        and saves the updated history after — regardless of whether the run
-        succeeded or failed.
+        Passing ``session_id`` to ``run()`` is what enables persistence: the
+        agent loads prior conversation history before the run and saves the
+        updated history after — regardless of whether the run succeeded or
+        failed. Without an id, both are no-ops.
+
+        ``session_manager`` decides only *where* that history lives. When it
+        is omitted an ``InMemorySessionManager`` is used, so a session id on
+        its own gives memory that lasts as long as the process; pass a
+        ``FileSessionManager`` for history that survives a restart.
 
     Async usage::
 
@@ -175,7 +180,11 @@ class Agent:
     # ------------------------------------------------------------------
 
     async def _load_session(self, session_id: str | None) -> list:
-        if self._session_manager is None or session_id is None:
+        # The session id is what enables persistence, not the manager —
+        # __init__ substitutes an InMemorySessionManager when none is given,
+        # so there is always somewhere to write. Without an id there is no key
+        # to file history under, and both load and save become no-ops.
+        if session_id is None:
             return []
         try:
             messages = await self._session_manager.load(session_id)
@@ -198,7 +207,7 @@ class Agent:
         user_input: str,
         result: AgentResult,
     ) -> None:
-        if self._session_manager is None or session_id is None:
+        if session_id is None:
             return
 
         from sophons.models.messages import Message
