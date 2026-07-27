@@ -12,7 +12,11 @@ from pydantic import BaseModel, ValidationError
 from opentelemetry import trace
 from opentelemetry.trace import StatusCode
 
-from sophons.agents.conversation import ConversationManager
+from sophons.agents.conversation import (
+    ConversationManager,
+    PrepareContext,
+    TokenCounter,
+)
 from sophons.agents.hooks import (
     AfterModelCall,
     AfterToolCall,
@@ -85,6 +89,7 @@ class AgentLoop:
         system_prompt: str | None = None,
         hooks: HookRegistry | None = None,
         conversation_manager: ConversationManager | None = None,
+        token_counter: TokenCounter | None = None,
         retry_strategy: RetryStrategy | None = None,
         limits: RunLimits | None = None,
         guardrails: GuardrailChain | None = None,
@@ -95,6 +100,7 @@ class AgentLoop:
         self._system_prompt = system_prompt
         self._hooks = hooks or HookRegistry()
         self._conversation_manager = conversation_manager
+        self._token_counter = token_counter
         self._retry_strategy = retry_strategy or no_retry()
         self._limits = limits or RunLimits()
         self._guardrails = guardrails
@@ -201,7 +207,19 @@ class AgentLoop:
 
                     # ── 2. Prepare context ─────────────────────────────────
                     if self._conversation_manager is not None:
-                        context = self._conversation_manager.prepare(history)
+                        context = self._conversation_manager.prepare(
+                            history,
+                            PrepareContext(
+                                current_input=input,
+                                token_counter=self._token_counter,
+                                # Models declare their window if they know it;
+                                # None leaves ratio-based strategies to fall
+                                # back on absolute triggers.
+                                context_window=getattr(
+                                    self._model, "context_window", None
+                                ),
+                            ),
+                        )
                     else:
                         context = list(history)
 

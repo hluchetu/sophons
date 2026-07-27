@@ -14,6 +14,7 @@ from sophons.agents.conversation import (
     ApproximateTokenCounter,
     ContextBudgetExceededError,
     NullConversationManager,
+    PrepareContext,
     SlidingWindowManager,
     SummarizingManager,
     TokenBudgetManager,
@@ -321,6 +322,93 @@ def test_summarizing_merges_into_a_previous_summary():
 def test_summarizing_requires_a_trigger():
     with pytest.raises(ValueError):
         SummarizingManager(model=CountingModel(), keep_recent_messages=2)
+
+
+# ---------------------------------------------------------------------------
+# PrepareContext — window-aware, proactive compression
+# ---------------------------------------------------------------------------
+
+
+def test_prepare_context_budget_is_a_fraction_of_the_window():
+    assert PrepareContext(context_window=1000).budget(0.7) == 700
+
+
+def test_prepare_context_budget_is_none_when_window_is_unknown():
+    """Ratio strategies must degrade rather than compress against a guess."""
+    assert PrepareContext().budget(0.7) is None
+
+
+def test_compression_threshold_fires_at_a_fraction_of_the_window():
+    model = CountingModel()
+    manager = SummarizingManager(
+        model=model, keep_recent_messages=2, compression_threshold=0.5
+    )
+    # 6 messages of ~29 tokens each ≈ 174, over 50% of a 200-token window.
+    history = [msg("user", "x" * 100, f"m{i}") for i in range(6)]
+
+    kept = manager.prepare(
+        history,
+        PrepareContext(token_counter=ApproximateTokenCounter(), context_window=200),
+    )
+
+    assert model.calls == 1
+    assert kept[0].metadata["kind"] == "conversation_summary"
+
+
+def test_compression_threshold_stays_quiet_below_the_ratio():
+    model = CountingModel()
+    manager = SummarizingManager(
+        model=model, keep_recent_messages=2, compression_threshold=0.5
+    )
+    history = [msg("user", "x" * 100, f"m{i}") for i in range(6)]
+
+    # Same history, a much larger window: nothing needs compressing yet.
+    kept = manager.prepare(
+        history,
+        PrepareContext(token_counter=ApproximateTokenCounter(), context_window=10_000),
+    )
+
+    assert model.calls == 0
+    assert kept == history
+
+
+def test_compression_threshold_needs_a_declared_window():
+    """With no window the ratio is meaningless, so it must not fire."""
+    model = CountingModel()
+    manager = SummarizingManager(
+        model=model, keep_recent_messages=2, compression_threshold=0.5
+    )
+    history = [msg("user", "x" * 100, f"m{i}") for i in range(6)]
+
+    assert manager.prepare(history, PrepareContext()) == history
+    assert model.calls == 0
+
+
+def test_context_supplies_a_counter_the_manager_lacks():
+    """A manager without its own counter can use the one from the run."""
+    model = CountingModel()
+    manager = SummarizingManager(
+        model=model, keep_recent_messages=2, compression_threshold=0.5
+    )
+    history = [msg("user", "x" * 100, f"m{i}") for i in range(6)]
+
+    kept = manager.prepare(
+        history,
+        PrepareContext(token_counter=ApproximateTokenCounter(), context_window=200),
+    )
+
+    assert kept[0].metadata["kind"] == "conversation_summary"
+
+
+def test_compression_threshold_must_be_a_ratio():
+    with pytest.raises(ValueError):
+        SummarizingManager(
+            model=CountingModel(), keep_recent_messages=2, compression_threshold=1.5
+        )
+    with pytest.raises(ValueError):
+        SummarizingManager(
+            model=CountingModel(), keep_recent_messages=2, compression_threshold=0
+        )
 
 
 def test_summarizing_keep_recent_must_be_under_trigger():

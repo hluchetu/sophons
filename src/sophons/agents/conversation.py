@@ -82,7 +82,7 @@ class ConversationManager(Protocol):
     def prepare(
         self,
         messages: list[Message],
-        current_input: str | None = None,
+        context: PrepareContext | None = None,
     ) -> list[Message]: ...
 
 
@@ -102,7 +102,7 @@ class NullConversationManager:
     def prepare(
         self,
         messages: list[Message],
-        current_input: str | None = None,
+        context: PrepareContext | None = None,
     ) -> list[Message]:
         return messages
 
@@ -134,9 +134,39 @@ def _tool_calls(message: Message) -> list[dict[str, Any]]:
 
 @dataclass(frozen=True)
 class PrepareContext:
-    """Passed to every manager's ``prepare`` call."""
+    """
+    What a manager knows about the run when deciding what to keep.
+
+    Managers stay pure functions of ``(messages, context)``. Anything a
+    strategy needs beyond the messages themselves arrives here rather than
+    being captured at construction, which is what lets a budget be expressed
+    as a fraction of the model's real window instead of a number the caller
+    has to guess.
+
+    Attributes:
+        current_input:  The user message this run is answering, when known.
+        token_counter:  Counter for sizing messages. Managers given their own
+                        counter should prefer that; this is the fallback.
+        context_window: The model's total context size in tokens, when the
+                        model declares one. ``None`` means unknown, and any
+                        ratio-based behaviour must degrade rather than guess.
+    """
 
     current_input: str | None = None
+    token_counter: TokenCounter | None = None
+    context_window: int | None = None
+
+    def budget(self, ratio: float) -> int | None:
+        """
+        Tokens available at ``ratio`` of the model's window.
+
+        Returns ``None`` when the window is unknown, so callers can fall back
+        to an absolute setting instead of compressing against a number that
+        does not exist.
+        """
+        if self.context_window is None:
+            return None
+        return int(self.context_window * ratio)
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +195,7 @@ class SlidingWindowManager:
     def prepare(
         self,
         messages: list[Message],
-        current_input: str | None = None,
+        context: PrepareContext | None = None,
     ) -> list[Message]:
         if not messages:
             return messages
@@ -223,7 +253,7 @@ class TokenBudgetManager:
     def prepare(
         self,
         messages: list[Message],
-        current_input: str | None = None,
+        context: PrepareContext | None = None,
     ) -> list[Message]:
         if not messages:
             return messages
@@ -337,7 +367,7 @@ class ToolInteractionCompactor:
     def prepare(
         self,
         messages: list[Message],
-        current_input: str | None = None,
+        context: PrepareContext | None = None,
     ) -> list[Message]:
         units = self._group_units(messages)
         tool_unit_indices = [
@@ -447,10 +477,20 @@ class SummarizingManager:
         trigger_message_count: int | None = None,
         trigger_token_count: int | None = None,
         token_counter: TokenCounter | None = None,
+        compression_threshold: float | None = None,
     ) -> None:
-        if trigger_message_count is None and trigger_token_count is None:
+        if (
+            trigger_message_count is None
+            and trigger_token_count is None
+            and compression_threshold is None
+        ):
             raise ValueError(
-                "Provide at least one of trigger_message_count or trigger_token_count."
+                "Provide at least one of trigger_message_count, "
+                "trigger_token_count, or compression_threshold."
+            )
+        if compression_threshold is not None and not 0 < compression_threshold <= 1:
+            raise ValueError(
+                "compression_threshold must be between 0 and 1 exclusive of 0."
             )
         if trigger_token_count is not None and token_counter is None:
             raise ValueError(
@@ -471,13 +511,14 @@ class SummarizingManager:
         self._trigger_message_count = trigger_message_count
         self._trigger_token_count = trigger_token_count
         self._token_counter = token_counter
+        self._compression_threshold = compression_threshold
 
     def prepare(
         self,
         messages: list[Message],
-        current_input: str | None = None,
+        context: PrepareContext | None = None,
     ) -> list[Message]:
-        if not self._should_summarize(messages):
+        if not self._should_summarize(messages, context):
             return messages
 
         old = messages[: -self._keep_recent]
@@ -512,11 +553,28 @@ class SummarizingManager:
 
     # ------------------------------------------------------------------
 
-    def _should_summarize(self, messages: list[Message]) -> bool:
+    def _should_summarize(
+        self,
+        messages: list[Message],
+        context: PrepareContext | None = None,
+    ) -> bool:
         if len(messages) <= self._keep_recent:
             return False
-        if self._trigger_token_count is not None and self._token_counter is not None:
-            total = sum(self._token_counter.count_message(m) for m in messages)
+
+        counter = self._token_counter or (context.token_counter if context else None)
+
+        # Proactive: compress at a fraction of the model's real window, so the
+        # threshold does not have to be guessed per model. Only usable when the
+        # model declares a window and a counter is available; otherwise fall
+        # through to the absolute triggers below.
+        if self._compression_threshold is not None and counter is not None:
+            budget = context.budget(self._compression_threshold) if context else None
+            if budget is not None:
+                total = sum(counter.count_message(m) for m in messages)
+                return total > budget
+
+        if self._trigger_token_count is not None and counter is not None:
+            total = sum(counter.count_message(m) for m in messages)
             return total > self._trigger_token_count
         if self._trigger_message_count is not None:
             return len(messages) >= self._trigger_message_count
@@ -602,9 +660,9 @@ class ManagerPipeline:
     def prepare(
         self,
         messages: list[Message],
-        current_input: str | None = None,
+        context: PrepareContext | None = None,
     ) -> list[Message]:
         result = messages
         for manager in self._managers:
-            result = manager.prepare(result, current_input)
+            result = manager.prepare(result, context)
         return result

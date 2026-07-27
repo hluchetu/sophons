@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from sophons.agents.conversation import ConversationManager
+from sophons.agents.conversation import ConversationManager, TokenCounter
 from sophons.agents.hooks import HookCallback, HookEventT, HookRegistry
 from sophons.agents.loop import AgentLoop
 from sophons.agents.responses import AgentResult
@@ -70,6 +70,7 @@ class Agent:
         system_prompt: str | None = None,
         hooks: HookRegistry | None = None,
         conversation_manager: ConversationManager | None = None,
+        token_counter: TokenCounter | None = None,
         session_manager: SessionManager | None = None,
         retry_strategy: RetryStrategy | None = None,
         limits: RunLimits | None = None,
@@ -87,6 +88,7 @@ class Agent:
             system_prompt=system_prompt,
             hooks=self._hooks,
             conversation_manager=conversation_manager,
+            token_counter=token_counter,
             retry_strategy=retry_strategy or exponential_backoff(),
             limits=limits,
             guardrails=guardrails,

@@ -16,8 +16,15 @@ class DeepSeekModel:
         api_key: str,
         base_url: str = "https://api.deepseek.com/v1",
         thinking: bool = False,
+        context_window: int | None = None,
     ) -> None:
         self.model = model
+        # Total context size in tokens, read by ratio-based conversation
+        # managers. Left unset by default rather than guessed: the figure
+        # differs per model and changes between releases, and a wrong value
+        # is worse than an absent one — strategies fall back to absolute
+        # thresholds when this is None.
+        self.context_window = context_window
         self._client = OpenAI(api_key=api_key, base_url=base_url)
         self._thinking = thinking
         self._adapter = OpenAICompatAdapter()
