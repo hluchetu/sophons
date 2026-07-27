@@ -79,6 +79,7 @@ class AgentResult:
     tool_results: list[ToolResult]  # every tool result received
     success: bool  # did it reach end_turn cleanly?
     error: str | None = None  # error message if stop_reason is ERROR
+    output: Any = None  # validated output object when output_type is set
 
     def __str__(self) -> str:
         return self.message

@@ -5,6 +5,8 @@ import logging
 import uuid
 from typing import Any
 
+from pydantic import BaseModel
+
 from sophons.agents.conversation import ConversationManager
 from sophons.agents.hooks import HookCallback, HookEventT, HookRegistry
 from sophons.agents.loop import AgentLoop
@@ -59,6 +61,7 @@ class Agent:
         *,
         model: Any,
         tools: list[Tool | AsyncTool] | None = None,
+        output_type: type[BaseModel] | None = None,
         system_prompt: str | None = None,
         hooks: HookRegistry | None = None,
         conversation_manager: ConversationManager | None = None,
@@ -75,6 +78,7 @@ class Agent:
         self._loop = AgentLoop(
             model=model,
             tools=tools,
+            output_type=output_type,
             system_prompt=system_prompt,
             hooks=self._hooks,
             conversation_manager=conversation_manager,

@@ -7,6 +7,8 @@ import time
 import uuid
 from typing import Any
 
+from pydantic import BaseModel, ValidationError
+
 from opentelemetry import trace
 from opentelemetry.trace import StatusCode
 
@@ -36,6 +38,8 @@ from sophons.guardrails.approval import ApprovalRequest, Approver
 from sophons.models.messages import Message
 from sophons.observability import _semconv
 from sophons.tools.base import AsyncTool, Tool
+from sophons.agents.output import OutputTool, format_validation_error
+
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +81,7 @@ class AgentLoop:
         *,
         model: Any,
         tools: list[Tool | AsyncTool] | None = None,
+        output_type: type[BaseModel] | None = None,
         system_prompt: str | None = None,
         hooks: HookRegistry | None = None,
         conversation_manager: ConversationManager | None = None,
@@ -94,6 +99,13 @@ class AgentLoop:
         self._limits = limits or RunLimits()
         self._guardrails = guardrails
         self._approver = approver
+        self._output_tool: OutputTool | None = None
+
+        if output_type is not None:
+            self._output_tool = OutputTool(output_type)
+            self._tools[self._output_tool.name] = self._output_tool
+
+
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -231,6 +243,67 @@ class AgentLoop:
                     pending_tool_uses = _extract_tool_uses(response)
 
                     if pending_tool_uses:
+                        # ── 4a. Structured output ──────────────────────────
+                        # A call to the output tool is not a request to *do*
+                        # anything — it is the model handing back the answer
+                        # in the required shape, so it ends the run.
+                        if self._output_tool is not None:
+                            final_use = next(
+                                (
+                                    use
+                                    for use in pending_tool_uses
+                                    if use.name == self._output_tool.name
+                                ),
+                                None,
+                            )
+                            if final_use is not None:
+                                tool_uses.append(final_use)
+                                state.tool_call_count += 1
+
+                                try:
+                                    output = self._output_tool.validate(
+                                        final_use.input
+                                    )
+                                except ValidationError as validation_error:
+                                    # Hand the model its own validation errors
+                                    # so it can correct them, rather than
+                                    # failing the run. Bounded by max_steps.
+                                    retry = ToolResult(
+                                        tool_use_id=final_use.tool_use_id,
+                                        status="error",
+                                        content=format_validation_error(
+                                            validation_error
+                                        ),
+                                    )
+                                    tool_results.append(retry)
+                                    history.append(_tool_result_to_message(retry))
+                                    state.step_count += 1
+                                    continue
+
+                                accepted = ToolResult(
+                                    tool_use_id=final_use.tool_use_id,
+                                    status="success",
+                                    content=output.model_dump_json(),
+                                )
+                                tool_results.append(accepted)
+                                state.step_count += 1
+
+                                result = self._build_result(
+                                    stop_reason=StopReason.END_TURN,
+                                    message=output.model_dump_json(),
+                                    state=state,
+                                    tool_uses=tool_uses,
+                                    tool_results=tool_results,
+                                    success=True,
+                                    session_id=session_id,
+                                    output=output,
+                                )
+                                _record_result(root_span, result)
+                                self._hooks.invoke(
+                                    AgentFinished(result=result, session_id=session_id)
+                                )
+                                return result
+
                         for tool_use in pending_tool_uses:
                             tool_result = await self._execute_tool(
                                 tool_use=tool_use,
@@ -397,7 +470,12 @@ class AgentLoop:
                             )
                 elif not decision.allowed:
                     blocked = decision
-                elif decision.action == "transform":
+                elif decision.action == "transform" and isinstance(
+                    decision.transformed, dict
+                ):
+                    # transformed is Any | None; at the tool boundary only a
+                    # dict of arguments is usable, so ignore anything else
+                    # rather than handing tool.call() a non-mapping.
                     tool_args = decision.transformed
 
             if tool is None:
@@ -461,6 +539,7 @@ class AgentLoop:
         success: bool,
         session_id: str | None = None,
         error: Exception | None = None,
+        output: Any = None,
     ) -> AgentResult:
         metrics = AgentMetrics(
             steps=state.step_count,
@@ -481,6 +560,7 @@ class AgentLoop:
             tool_results=tool_results,
             success=success,
             error=str(error) if error is not None else None,
+            output=output,
         )
 
 
