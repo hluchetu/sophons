@@ -7,6 +7,7 @@ from sophons.agents.conversation import (
     ContextBudgetExceededError,
     ManagerPipeline,
     NullConversationManager,
+    PrepareContext,
     SlidingWindowManager,
     SummarizationError,
     SummarizingManager,
@@ -84,6 +85,7 @@ __all__ = [
     # Conversation
     "ConversationManager",
     "NullConversationManager",
+    "PrepareContext",
     "TokenCounter",
     "ApproximateTokenCounter",
     "SlidingWindowManager",
