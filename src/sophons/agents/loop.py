@@ -37,6 +37,7 @@ from sophons.agents.responses import (
 )
 from sophons.agents.retry import RetryStrategy, no_retry
 from sophons.agents.state import RunLimits, RunState
+from sophons.errors import is_context_overflow
 from sophons.guardrails import GuardrailChain, GuardrailContext
 from sophons.guardrails.approval import ApprovalRequest, Approver
 from sophons.models.messages import Message
@@ -206,19 +207,17 @@ class AgentLoop:
                         return result
 
                     # ── 2. Prepare context ─────────────────────────────────
+                    prepare_context = PrepareContext(
+                        current_input=input,
+                        token_counter=self._token_counter,
+                        # Models declare their window if they know it; None
+                        # leaves ratio-based strategies to fall back on
+                        # absolute triggers.
+                        context_window=getattr(self._model, "context_window", None),
+                    )
                     if self._conversation_manager is not None:
                         context = self._conversation_manager.prepare(
-                            history,
-                            PrepareContext(
-                                current_input=input,
-                                token_counter=self._token_counter,
-                                # Models declare their window if they know it;
-                                # None leaves ratio-based strategies to fall
-                                # back on absolute triggers.
-                                context_window=getattr(
-                                    self._model, "context_window", None
-                                ),
-                            ),
+                            history, prepare_context
                         )
                     else:
                         context = list(history)
@@ -232,9 +231,36 @@ class AgentLoop:
                     with _TRACER.start_as_current_span(
                         "chat", attributes={_semconv.STEP: state.step_count}
                     ) as model_span:
-                        response: Message = await self._retry_strategy.execute(
-                            lambda: self._invoke_model(context)
-                        )
+                        try:
+                            response: Message = await self._retry_strategy.execute(
+                                lambda: self._invoke_model(context)
+                            )
+                        except Exception as model_error:
+                            # A rejected-as-too-large request is recoverable in
+                            # a way most provider errors are not: ask the
+                            # manager for less and try once more. Estimating
+                            # size beforehand can be wrong; this path does not
+                            # depend on estimating correctly.
+                            if (
+                                self._conversation_manager is None
+                                or not is_context_overflow(model_error)
+                            ):
+                                raise
+                            logger.info(
+                                "step=%s context overflow, reducing and retrying: %r",
+                                state.step_count,
+                                model_error,
+                            )
+                            model_span.add_event(
+                                "context_overflow",
+                                {"sophons.context.messages_before": len(context)},
+                            )
+                            context = self._conversation_manager.reduce_context(
+                                history, prepare_context, model_error
+                            )
+                            response = await self._retry_strategy.execute(
+                                lambda: self._invoke_model(context)
+                            )
                         _record_usage(model_span, response)
                     model_call_ms = (time.monotonic() - model_call_start) * 1000
 

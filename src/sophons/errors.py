@@ -7,6 +7,7 @@ class ErrorCode(str, Enum):
     """Stable Sophons error codes for docs, logs, and integrations."""
 
     CONFIGURATION_ERROR = "CONFIGURATION_ERROR"
+    CONTEXT_WINDOW_OVERFLOW = "CONTEXT_WINDOW_OVERFLOW"
     INTEGRATION_ERROR = "INTEGRATION_ERROR"
     LOADER_ERROR = "LOADER_ERROR"
     MISSING_DEPENDENCY = "MISSING_DEPENDENCY"
@@ -106,6 +107,51 @@ class ToolError(SophonsError):
 
     def __init__(self, message: str, *, details: dict | None = None) -> None:
         super().__init__(message, error_code=ErrorCode.TOOL_ERROR, details=details)
+
+
+class ContextWindowOverflowError(SophonsError):
+    """
+    Raised when the model rejects a request for exceeding its context window.
+
+    This is recoverable, unlike most provider errors: the agent asks its
+    conversation manager to reduce the context and tries again. Provider
+    adapters map their own "prompt is too long" errors onto this so the loop
+    does not have to know each provider's wording.
+    """
+
+    def __init__(self, message: str, *, details: dict | None = None) -> None:
+        super().__init__(
+            message,
+            error_code=ErrorCode.CONTEXT_WINDOW_OVERFLOW,
+            details=details,
+        )
+
+
+_OVERFLOW_MARKERS = (
+    "context length",
+    "context_length_exceeded",
+    "context window",
+    "maximum context",
+    "prompt is too long",
+    "too many tokens",
+    "reduce the length",
+    "string too long",
+)
+
+
+def is_context_overflow(error: Exception) -> bool:
+    """
+    Guess whether a provider error means "your request was too large".
+
+    Providers report this inconsistently and none of them use a shared error
+    code, so matching on message text is the available option. False
+    negatives merely mean the run fails as it does today; false positives
+    cost one wasted retry with a smaller context.
+    """
+    if isinstance(error, ContextWindowOverflowError):
+        return True
+    text = str(error).lower()
+    return any(marker in text for marker in _OVERFLOW_MARKERS)
 
 
 class IntegrationError(SophonsError):

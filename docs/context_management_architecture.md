@@ -4,7 +4,7 @@ This note is a local design guide for how Sophons decides what a model sees.
 It records a problem with the current shape, the proposed replacement, and
 the reasoning for each divergence from other SDKs.
 
-Status: **proposal**. Nothing here is implemented yet.
+Status: **implemented**. See the migration section for what changed.
 
 ## Core Idea
 
@@ -174,19 +174,35 @@ limit entirely; model adapters return assistant messages with no id
 (`test_token_budget_always_keeps_messages_without_ids`). The merged window
 manager should select by position rather than by id set.
 
-## Migration
+## Migration — done
 
-Nothing is published and the only consumer is `sophons-examples`, so this is
-the cheapest this change will ever be.
+1. ✅ `reduce_context` added to the protocol and to all three managers.
+   `SlidingWindowManager` halves its window; `SummarizingManager` summarizes
+   below its own trigger; `NullConversationManager` re-raises rather than
+   returning the identical request.
+2. ✅ `TokenBudgetManager` merged into `SlidingWindowManager(max_tokens=...)`.
+3. ✅ Tool-pair grouping moved to `_group_units`, applied by every manager.
+4. ✅ `ToolInteractionCompactor` folded into `truncate_tool_results`, on by
+   default, applied before anything is dropped.
+5. ✅ `ManagerPipeline` deleted.
+6. ✅ Both defect-pinning tests inverted:
+   `test_sliding_window_can_split_a_tool_pair` became
+   `test_sliding_window_never_splits_a_tool_pair`, and
+   `test_token_budget_always_keeps_messages_without_ids` became
+   `test_token_budget_bounds_messages_without_ids`. A third,
+   `test_sliding_window_hoists_a_late_system_message`, became
+   `test_sliding_window_preserves_original_ordering` — the window no longer
+   reorders history.
+7. ⬜ `memory/context_window.py` in sophons-examples, still to write against
+   the new shape.
 
-1. Add `reduce_context` to the protocol with a default implementation.
-2. Merge `TokenBudgetManager` into `SlidingWindowManager` as `max_tokens`.
-3. Move tool-pair grouping into a shared helper; apply it in every manager.
-4. Fold `ToolInteractionCompactor` into `truncate_tool_results`.
-5. Delete `ManagerPipeline`.
-6. Rewrite the three tests that currently pin defective behaviour —
-   `test_sliding_window_can_split_a_tool_pair` and
-   `test_token_budget_always_keeps_messages_without_ids` should invert, since
-   the refactor is what makes them wrong.
-7. Update `memory/context_window.py`, which is still unwritten and should be
-   written against the new shape rather than the old one.
+Verified end to end: an agent facing a model that rejects oversized requests
+fails outright with no manager (`attempts=[13]`) and recovers with one
+(`attempts=[10, 5]` — rejected at ten messages, halved, retried, succeeded).
+
+### Selection by position, not by id
+
+The merged window selects on list positions rather than a set of message ids.
+The old id-set filter ended `m.id in kept_ids or m.id is None`, which let any
+message without an id through regardless of budget — and model adapters return
+assistant messages with no id. Positions have no such escape hatch.

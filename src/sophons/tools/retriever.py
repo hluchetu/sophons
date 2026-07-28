@@ -9,8 +9,14 @@ from sophons.tools.base import ToolArgs, ToolResult, ToolSchema
 @dataclass(frozen=True, slots=True)
 class RetrieverTool:
     """
-    A tool that wraps a retriever — lets an agent search a knowledge base
-    from inside its ReAct loop, the same way it calls web search or a calculator.
+    Adapts a retriever into an agent tool.
+
+    The agent sees a normal tool: a name, description, argument schema,
+    and call method. Internally, the tool runs the retriever and returns
+    the top passages as text.
+
+    Use this when retrieval should be an action the agent can choose,
+    rather than a pipeline step that always runs.
 
     Args:
         name:        Tool name the model uses to invoke it.
@@ -24,7 +30,7 @@ class RetrieverTool:
 
         tool = RetrieverTool(
             name="search_docs",
-            description="Search the company policy documentation.",
+            description="Search company policy documents.",
             retriever=SemanticRetriever(embedder=..., vector_store=...),
         )
         agent = Agent(model=my_model, tools=[tool])

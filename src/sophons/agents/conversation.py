@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
 from sophons.models.messages import Message
@@ -75,14 +75,27 @@ class ConversationManager(Protocol):
     """
     Decides which messages from the full history are passed to the model.
 
-    ``prepare`` receives the complete message list and returns the slice
-    the model should see.  It must not mutate the input list.
+    Two moments, two methods:
+
+    - ``prepare`` runs before every model call and returns the slice the
+      model should see. It must not mutate the input list.
+    - ``reduce_context`` runs after the model has *rejected* a request for
+      being too large, and returns something smaller to retry with. An
+      estimate can be wrong; this is the path that does not depend on
+      guessing correctly.
     """
 
     def prepare(
         self,
         messages: list[Message],
         context: PrepareContext | None = None,
+    ) -> list[Message]: ...
+
+    def reduce_context(
+        self,
+        messages: list[Message],
+        context: PrepareContext | None = None,
+        error: Exception | None = None,
     ) -> list[Message]: ...
 
 
@@ -104,6 +117,19 @@ class NullConversationManager:
         messages: list[Message],
         context: PrepareContext | None = None,
     ) -> list[Message]:
+        return messages
+
+    def reduce_context(
+        self,
+        messages: list[Message],
+        context: PrepareContext | None = None,
+        error: Exception | None = None,
+    ) -> list[Message]:
+        # Nothing to give back. Re-raising is honest: a manager that declines
+        # to manage cannot rescue an overflow, and pretending otherwise would
+        # send the identical request again.
+        if error is not None:
+            raise error
         return messages
 
 
@@ -168,56 +194,74 @@ class PrepareContext:
             return None
         return int(self.context_window * ratio)
 
+# ---------------------------------------------------------------------------
+# Shared internals
+# ---------------------------------------------------------------------------
+# These are invariants, not strategies. Every manager needs them, and none of
+# them is a decision a caller should have to make.
+
+
+def _group_units(
+    messages: list[Message],
+    indices: list[int] | None = None,
+) -> list[list[int]]:
+    """
+    Group message indices into atomic units.
+
+    An assistant message carrying tool calls belongs with the tool results
+    that answer it: sending a tool result whose originating call was dropped
+    produces a malformed request that some providers reject outright. Units
+    exist so no strategy can split that pair, whatever else it discards.
+    """
+    positions = list(range(len(messages))) if indices is None else list(indices)
+    units: list[list[int]] = []
+    cursor = 0
+    while cursor < len(positions):
+        index = positions[cursor]
+        unit = [index]
+        cursor += 1
+        if messages[index].role == "assistant" and _has_tool_calls(messages[index]):
+            while (
+                cursor < len(positions)
+                and messages[positions[cursor]].role == "tool"
+            ):
+                unit.append(positions[cursor])
+                cursor += 1
+        units.append(unit)
+    return units
+
+
+def _truncate_tool_results(
+    messages: list[Message],
+    max_chars: int,
+) -> list[Message]:
+    """
+    Shrink oversized tool results, keeping both ends.
+
+    Run before anything is dropped. A 10 KB tool result costs a lot of
+    context and little meaning; discarding the message that holds it costs
+    the agent its record of what it did. Head and tail are kept because the
+    useful parts of a long result usually sit at the edges — what was asked
+    for, and how it ended.
+    """
+    truncated: list[Message] = []
+    for message in messages:
+        if message.role == "tool" and len(message.content) > max_chars:
+            head = max_chars // 2
+            tail = max_chars - head
+            body = (
+                f"{message.content[:head].rstrip()}"
+                f"\n...[{len(message.content) - max_chars} characters truncated]...\n"
+                f"{message.content[-tail:].lstrip()}"
+            )
+            truncated.append(replace(message, content=body))
+        else:
+            truncated.append(message)
+    return truncated
+
 
 # ---------------------------------------------------------------------------
 # SlidingWindowManager
-# ---------------------------------------------------------------------------
-
-
-class SlidingWindowManager:
-    """
-    Keeps the last ``max_messages`` messages.
-
-    System messages at the front are always preserved regardless of the
-    window size.
-    """
-
-    def __init__(
-        self,
-        max_messages: int,
-        preserve_system_messages: bool = True,
-    ) -> None:
-        if max_messages <= 0:
-            raise ValueError("max_messages must be greater than 0.")
-        self._max_messages = max_messages
-        self._preserve_system = preserve_system_messages
-
-    def prepare(
-        self,
-        messages: list[Message],
-        context: PrepareContext | None = None,
-    ) -> list[Message]:
-        if not messages:
-            return messages
-
-        system_messages: list[Message] = []
-        rest: list[Message] = []
-
-        if self._preserve_system:
-            for message in messages:
-                if message.role == "system":
-                    system_messages.append(message)
-                else:
-                    rest.append(message)
-        else:
-            rest = list(messages)
-
-        trimmed = rest[-self._max_messages :]
-        return [*system_messages, *trimmed]
-
-
-# ---------------------------------------------------------------------------
-# TokenBudgetManager
 # ---------------------------------------------------------------------------
 
 
@@ -225,30 +269,58 @@ class ContextBudgetExceededError(Exception):
     """Raised when preserved messages alone exceed the token budget."""
 
 
-class TokenBudgetManager:
+class SlidingWindowManager:
     """
-    Keeps as many messages as fit within a token budget, always keeping the
-    most recent messages and any pinned or system messages.
+    Keeps the most recent history and drops the rest.
 
-    Tool call + tool result groups are treated as a single unit so a tool
-    interaction is never split across the context boundary.
+    The window is measured either in messages or in tokens — the same
+    strategy, sized differently, so it is one argument rather than two
+    classes. Pass exactly one of ``max_messages`` or ``max_tokens``.
+
+    Two behaviours are invariants rather than options:
+
+    - A tool call and its results are kept or dropped together, never split.
+    - Oversized tool results are truncated before any message is discarded,
+      because shrinking a result loses less than losing the record of it.
+
+    System messages and pinned messages are preserved regardless of the
+    window, and the original ordering of what survives is left alone.
+
+    Args:
+        max_messages:            Window size in messages.
+        max_tokens:              Window size in tokens. Mutually exclusive
+                                 with ``max_messages``.
+        token_counter:           Used when sizing in tokens. Defaults to
+                                 ``ApproximateTokenCounter``.
+        truncate_tool_results:   Shrink long tool results before dropping.
+        max_result_chars:        Size a tool result is truncated to.
+        preserve_system_messages: Keep system messages outside the window.
     """
 
     def __init__(
         self,
-        max_tokens: int,
-        token_counter: TokenCounter,
+        max_messages: int | None = None,
+        max_tokens: int | None = None,
+        token_counter: TokenCounter | None = None,
+        truncate_tool_results: bool = True,
+        max_result_chars: int = 500,
         preserve_system_messages: bool = True,
     ) -> None:
-        if max_tokens <= 0:
+        if (max_messages is None) == (max_tokens is None):
+            raise ValueError("Provide exactly one of max_messages or max_tokens.")
+        if max_messages is not None and max_messages <= 0:
+            raise ValueError("max_messages must be greater than 0.")
+        if max_tokens is not None and max_tokens <= 0:
             raise ValueError("max_tokens must be greater than 0.")
+        if max_result_chars <= 0:
+            raise ValueError("max_result_chars must be greater than 0.")
+
+        self._max_messages = max_messages
         self._max_tokens = max_tokens
         self._token_counter = token_counter
+        self._truncate_tool_results = truncate_tool_results
+        self._max_result_chars = max_result_chars
         self._preserve_system = preserve_system_messages
-
-    # ------------------------------------------------------------------
-    # ConversationManager
-    # ------------------------------------------------------------------
 
     def prepare(
         self,
@@ -258,187 +330,104 @@ class TokenBudgetManager:
         if not messages:
             return messages
 
-        preserved, candidates = self._split_preserved(messages)
-        used = self._count(preserved)
+        working = messages
+        if self._truncate_tool_results:
+            working = _truncate_tool_results(working, self._max_result_chars)
 
+        # Selection works on positions rather than message ids: an earlier
+        # version filtered by id set, so messages without an id escaped the
+        # budget entirely — and model adapters return assistant messages with
+        # no id.
+        preserved = {
+            index
+            for index, message in enumerate(working)
+            if (self._preserve_system and message.role == "system")
+            or _is_pinned(message)
+        }
+        candidates = [i for i in range(len(working)) if i not in preserved]
+        units = _group_units(working, candidates)
+
+        if self._max_tokens is not None:
+            selected = self._select_by_tokens(working, units, preserved, context)
+        else:
+            selected = self._select_by_count(units)
+
+        keep = preserved | selected
+        return [message for index, message in enumerate(working) if index in keep]
+
+    def reduce_context(
+        self,
+        messages: list[Message],
+        context: PrepareContext | None = None,
+        error: Exception | None = None,
+    ) -> list[Message]:
+        """Halve the window after the model rejected the request as too large."""
+        halved = SlidingWindowManager(
+            max_messages=(
+                max(1, self._max_messages // 2)
+                if self._max_messages is not None
+                else None
+            ),
+            max_tokens=(
+                max(1, self._max_tokens // 2) if self._max_tokens is not None else None
+            ),
+            token_counter=self._token_counter,
+            truncate_tool_results=self._truncate_tool_results,
+            max_result_chars=self._max_result_chars,
+            preserve_system_messages=self._preserve_system,
+        )
+        return halved.prepare(messages, context)
+
+    # ------------------------------------------------------------------
+
+    def _counter(self, context: PrepareContext | None) -> TokenCounter:
+        return (
+            self._token_counter
+            or (context.token_counter if context else None)
+            or ApproximateTokenCounter()
+        )
+
+    def _select_by_tokens(
+        self,
+        messages: list[Message],
+        units: list[list[int]],
+        preserved: set[int],
+        context: PrepareContext | None,
+    ) -> set[int]:
+        assert self._max_tokens is not None
+        counter = self._counter(context)
+        used = sum(counter.count_message(messages[i]) for i in preserved)
         if used > self._max_tokens:
             raise ContextBudgetExceededError(
                 "Preserved messages already exceed the token budget."
             )
 
-        selected_units: list[list[Message]] = []
-        units = self._group_units(candidates)
-
+        selected: set[int] = set()
         for unit in reversed(units):
-            cost = self._count(unit)
+            cost = sum(counter.count_message(messages[i]) for i in unit)
             if used + cost > self._max_tokens:
-                if not selected_units:
+                if not selected:
                     raise ContextBudgetExceededError(
                         "The newest message group exceeds the remaining token budget."
                     )
                 break
-            selected_units.append(unit)
+            selected.update(unit)
             used += cost
+        return selected
 
-        selected: list[Message] = [m for unit in reversed(selected_units) for m in unit]
-        kept_ids = {m.id for m in [*preserved, *selected] if m.id is not None}
-
-        # Preserve ordering from original list
-        return [m for m in messages if m.id in kept_ids or m.id is None]
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _split_preserved(
-        self,
-        messages: list[Message],
-    ) -> tuple[list[Message], list[Message]]:
-        preserved_ids: set[str] = set()
-        preserved: list[Message] = []
-        candidate_start = 0
-
-        if self._preserve_system:
-            for message in messages:
-                if message.role != "system":
-                    break
-                if message.id is not None:
-                    preserved_ids.add(message.id)
-                preserved.append(message)
-                candidate_start += 1
-
-        for message in messages:
-            if _is_pinned(message) and message.id not in preserved_ids:
-                if message.id is not None:
-                    preserved_ids.add(message.id)
-                preserved.append(message)
-
-        candidates = [
-            m for m in messages[candidate_start:] if m.id not in preserved_ids
-        ]
-        return preserved, candidates
-
-    def _group_units(self, messages: list[Message]) -> list[list[Message]]:
-        """Group assistant+tool call chains into atomic units."""
-        units: list[list[Message]] = []
-        index = 0
-        while index < len(messages):
-            message = messages[index]
-            unit = [message]
-            index += 1
-            if message.role == "assistant" and _has_tool_calls(message):
-                while index < len(messages) and messages[index].role == "tool":
-                    unit.append(messages[index])
-                    index += 1
-            units.append(unit)
-        return units
-
-    def _count(self, messages: list[Message]) -> int:
-        return sum(self._token_counter.count_message(m) for m in messages)
-
-
-# ---------------------------------------------------------------------------
-# ToolInteractionCompactor
-# ---------------------------------------------------------------------------
-
-
-class ToolInteractionCompactor:
-    """
-    Replaces old tool-call + tool-result groups with a compact summary
-    message, keeping only the most recent ``keep_recent`` interactions
-    in full.
-
-    This reduces context size without losing the record of what the agent
-    did.
-    """
-
-    def __init__(
-        self,
-        keep_recent: int,
-        max_result_chars: int = 500,
-    ) -> None:
-        if keep_recent < 0:
-            raise ValueError("keep_recent must be >= 0.")
-        if max_result_chars <= 0:
-            raise ValueError("max_result_chars must be > 0.")
-        self._keep_recent = keep_recent
-        self._max_result_chars = max_result_chars
-
-    def prepare(
-        self,
-        messages: list[Message],
-        context: PrepareContext | None = None,
-    ) -> list[Message]:
-        units = self._group_units(messages)
-        tool_unit_indices = [
-            i for i, unit in enumerate(units) if self._is_tool_interaction(unit)
-        ]
-        compact_count = max(0, len(tool_unit_indices) - self._keep_recent)
-        compact_indices = set(tool_unit_indices[:compact_count])
-
-        result: list[Message] = []
-        for i, unit in enumerate(units):
-            if i in compact_indices and not any(_is_pinned(m) for m in unit):
-                result.append(self._compact(unit))
-            else:
-                result.extend(unit)
-        return result
-
-    def _group_units(self, messages: list[Message]) -> list[list[Message]]:
-        units: list[list[Message]] = []
-        index = 0
-        while index < len(messages):
-            message = messages[index]
-            unit = [message]
-            index += 1
-            if message.role == "assistant" and _has_tool_calls(message):
-                while index < len(messages) and messages[index].role == "tool":
-                    unit.append(messages[index])
-                    index += 1
-            units.append(unit)
-        return units
-
-    def _is_tool_interaction(self, unit: list[Message]) -> bool:
-        return bool(unit) and unit[0].role == "assistant" and _has_tool_calls(unit[0])
-
-    def _compact(self, unit: list[Message]) -> Message:
-        assistant = unit[0]
-        tool_results = unit[1:]
-        covered_ids = [m.id for m in unit if m.id is not None]
-
-        lines = [
-            "Compacted older tool interaction.",
-            "The raw tool call and tool result messages were omitted from model context.",
-            "",
-            "Tool calls:",
-        ]
-        for tc in _tool_calls(assistant):
-            name = tc.get("name", "unknown")
-            args = tc.get("arguments", tc.get("input", {}))
-            lines.append(f"- {name}: {args}")
-
-        if assistant.content.strip():
-            lines += ["", f"Assistant note: {assistant.content.strip()}"]
-
-        if tool_results:
-            lines += ["", "Tool results:"]
-            for m in tool_results:
-                tool_name = str(m.metadata.get("name", "tool"))
-                lines.append(f"- {tool_name}: {self._truncate(m.content)}")
-
-        return Message(
-            role="system",
-            content="\n".join(lines),
-            metadata={
-                "kind": "tool_interaction_compaction",
-                "covered_item_ids": covered_ids,
-            },
-        )
-
-    def _truncate(self, text: str) -> str:
-        if len(text) <= self._max_result_chars:
-            return text
-        return f"{text[: self._max_result_chars].rstrip()}..."
+    def _select_by_count(self, units: list[list[int]]) -> set[int]:
+        assert self._max_messages is not None
+        selected: set[int] = set()
+        kept = 0
+        for unit in reversed(units):
+            # The newest unit is always kept whole, even if it alone exceeds
+            # the window — a truncated tool interaction is worse than a wide
+            # one.
+            if kept and kept + len(unit) > self._max_messages:
+                break
+            selected.update(unit)
+            kept += len(unit)
+        return selected
 
 
 # ---------------------------------------------------------------------------
@@ -615,6 +604,30 @@ class SummarizingManager:
         ids.extend(m.id for m in summarized if m.id is not None)
         return ids
 
+    def reduce_context(
+        self,
+        messages: list[Message],
+        context: PrepareContext | None = None,
+        error: Exception | None = None,
+    ) -> list[Message]:
+        """
+        Summarize regardless of the trigger, keeping fewer messages verbatim.
+
+        The trigger already failed to fire early enough — the model rejected
+        the request — so waiting for it again is not an option.
+        """
+        keep = max(1, self._keep_recent // 2)
+        forced = SummarizingManager(
+            model=self._model,
+            keep_recent_messages=keep,
+            # Just above what is kept, so anything older is summarized on this
+            # call rather than waiting for a threshold that has already proven
+            # too slow.
+            trigger_message_count=keep + 1,
+            token_counter=self._token_counter,
+        )
+        return forced.prepare(messages, context)
+
     def _call_model(self, messages: list[Message]) -> str:
         conversation_text = "\n".join(f"{m.role}: {m.content}" for m in messages)
         prompt_messages = [
@@ -636,33 +649,3 @@ class SummarizingManager:
                 "Failed to summarize conversation messages."
             ) from exc
         return response.content.strip()
-
-
-# ---------------------------------------------------------------------------
-# ManagerPipeline
-# ---------------------------------------------------------------------------
-
-
-class ManagerPipeline:
-    """
-    Chains multiple ``ConversationManager`` instances into one.
-
-    Each manager's output becomes the next manager's input.  Useful for
-    combining, for example, ``ToolInteractionCompactor`` followed by
-    ``TokenBudgetManager``.
-    """
-
-    def __init__(self, managers: list[ConversationManager]) -> None:
-        if not managers:
-            raise ValueError("ManagerPipeline requires at least one manager.")
-        self._managers = managers
-
-    def prepare(
-        self,
-        messages: list[Message],
-        context: PrepareContext | None = None,
-    ) -> list[Message]:
-        result = messages
-        for manager in self._managers:
-            result = manager.prepare(result, context)
-        return result

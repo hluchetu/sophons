@@ -17,9 +17,9 @@ from sophons.agents.conversation import (
     PrepareContext,
     SlidingWindowManager,
     SummarizingManager,
-    TokenBudgetManager,
-    ToolInteractionCompactor,
 )
+from dataclasses import replace
+
 from sophons.models import Message
 
 
@@ -116,10 +116,10 @@ def test_approximate_counter_rejects_bad_settings():
         ApproximateTokenCounter(per_message_overhead=-1)
 
 
-def test_approximate_counter_satisfies_token_budget_manager():
-    """The point of shipping it: TokenBudgetManager is now usable as-is."""
+def test_approximate_counter_is_the_default_for_token_windows():
+    """The point of shipping it: a token window is usable with no extra wiring."""
     history = [msg("user", "x" * 400, f"m{i}") for i in range(5)]
-    kept = TokenBudgetManager(
+    kept = SlidingWindowManager(
         max_tokens=250, token_counter=ApproximateTokenCounter()
     ).prepare(history)
 
@@ -142,8 +142,13 @@ def test_sliding_window_keeps_last_n_plus_system():
     assert [m.id for m in kept] == ["s", "m3", "m4"]
 
 
-def test_sliding_window_hoists_a_late_system_message():
-    """Current behaviour: system messages move to the front, not kept in place."""
+def test_sliding_window_preserves_original_ordering():
+    """A late system message is kept, but not moved.
+
+    The previous implementation hoisted every system message to the front,
+    silently reordering history. Preserving it is outside the window; moving
+    it is a different claim, and not one a window strategy should make.
+    """
     history = [
         msg("user", "first", "m0"),
         msg("system", "injected later", "s"),
@@ -151,20 +156,20 @@ def test_sliding_window_hoists_a_late_system_message():
     ]
     kept = SlidingWindowManager(max_messages=2).prepare(history)
 
-    assert kept[0].id == "s"  # reordered, despite arriving second
+    assert [m.id for m in kept] == ["m0", "s", "m1"]
 
 
-def test_sliding_window_can_split_a_tool_pair():
-    """Current behaviour: an orphaned tool result can be sent without its call.
+def test_sliding_window_never_splits_a_tool_pair():
+    """An orphaned tool result is malformed, not a smaller context.
 
-    Some providers reject that outright. TokenBudgetManager keeps such pairs
-    whole; the sliding window makes no such promise.
+    This inverts an earlier test that documented the split as behaviour. A
+    tool call and its results are one unit; the newest unit is kept whole
+    even when it alone exceeds the window.
     """
     history = [msg("user", "q", "m0"), *tool_exchange(1)]
     kept = SlidingWindowManager(max_messages=1).prepare(history)
 
-    assert [m.id for m in kept] == ["t1"]
-    assert kept[0].role == "tool"  # the matching assistant call is gone
+    assert [m.id for m in kept] == ["a1", "t1"]
 
 
 def test_sliding_window_rejects_zero():
@@ -173,13 +178,13 @@ def test_sliding_window_rejects_zero():
 
 
 # ---------------------------------------------------------------------------
-# TokenBudgetManager
+# SlidingWindowManager — sized in tokens
 # ---------------------------------------------------------------------------
 
 
 def test_token_budget_keeps_tool_pairs_whole():
     history = [msg("user", "q" * 40, "m0"), *tool_exchange(1)]
-    kept = TokenBudgetManager(max_tokens=8, token_counter=CharTokenCounter()).prepare(
+    kept = SlidingWindowManager(max_tokens=8, token_counter=CharTokenCounter()).prepare(
         history
     )
     ids = [m.id for m in kept]
@@ -191,64 +196,80 @@ def test_token_budget_keeps_tool_pairs_whole():
 def test_token_budget_raises_when_preserved_alone_exceeds_budget():
     history = [msg("system", "x" * 400, "s"), msg("user", "hi", "m0")]
     with pytest.raises(ContextBudgetExceededError):
-        TokenBudgetManager(max_tokens=5, token_counter=CharTokenCounter()).prepare(
+        SlidingWindowManager(max_tokens=5, token_counter=CharTokenCounter()).prepare(
             history
         )
 
 
-def test_token_budget_always_keeps_messages_without_ids():
-    """Current behaviour, and a trap.
+def test_token_budget_bounds_messages_without_ids():
+    """Messages without an id are still subject to the budget.
 
-    The final filter is ``m.id in kept_ids or m.id is None``, so any message
-    lacking an id bypasses the budget entirely. Model adapters return
-    assistant messages with no id, so in a real run those accumulate
-    unbounded — exactly what the budget exists to prevent.
-
-    Note the budget must be large enough for the newest message, or the
-    manager raises before ever reaching that filter.
+    The previous implementation filtered by id set, so anything lacking an id
+    escaped the limit entirely — and model adapters return assistant messages
+    with no id. Selection now works on positions instead.
     """
     counter = CharTokenCounter()
-    # Five messages of 25 tokens each against a 30-token budget: selection
-    # keeps exactly one, then the id-less filter puts the other four back.
     history = [Message(role="user", content="x" * 100) for _ in range(5)]
-    kept = TokenBudgetManager(max_tokens=30, token_counter=counter).prepare(history)
+    kept = SlidingWindowManager(max_tokens=30, token_counter=counter).prepare(history)
 
-    assert len(kept) == 5
-    assert sum(counter.count_message(m) for m in kept) == 125  # budget was 30
+    assert len(kept) < 5
+    assert sum(counter.count_message(m) for m in kept) <= 30
 
 
 # ---------------------------------------------------------------------------
-# ToolInteractionCompactor
+# Tool result truncation
 # ---------------------------------------------------------------------------
 
 
-def test_compactor_replaces_old_interactions_with_a_summary():
-    history = [msg("user", "q", "m0"), *tool_exchange(1), *tool_exchange(2)]
-    kept = ToolInteractionCompactor(keep_recent=1).prepare(history)
+def test_truncation_shrinks_long_tool_results_keeping_both_ends():
+    """Shrinking a result loses less than dropping the message holding it."""
+    history = [msg("user", "q", "m0"), *tool_exchange(1)]
+    history[2] = replace(history[2], content="START" + "x" * 500 + "END")
 
-    summaries = [
-        m for m in kept if m.metadata.get("kind") == "tool_interaction_compaction"
-    ]
-    assert len(summaries) == 1
-    assert summaries[0].role == "system"  # compaction *adds* a message
-    assert "branch_hours" in summaries[0].content  # the record of what ran survives
-    assert summaries[0].metadata["covered_item_ids"] == ["a1", "t1"]
-    assert [m.id for m in kept if m.id] == ["m0", "a2", "t2"]
+    kept = SlidingWindowManager(max_messages=10, max_result_chars=100).prepare(history)
+    result = next(m for m in kept if m.role == "tool")
+
+    assert len(result.content) < 200
+    assert result.content.startswith("START")
+    assert result.content.endswith("END")
+    assert "truncated" in result.content
 
 
-def test_compactor_covered_ids_are_empty_without_message_ids():
-    """covered_item_ids is only useful when messages carry ids."""
-    history = [
-        Message(role="assistant", content="", metadata={"tool_calls": [{"name": "f"}]}),
-        Message(role="tool", content="r"),
-        *tool_exchange(2),
-    ]
-    kept = ToolInteractionCompactor(keep_recent=1).prepare(history)
-    summary = next(
-        m for m in kept if m.metadata.get("kind") == "tool_interaction_compaction"
-    )
+def test_truncation_leaves_short_results_alone():
+    history = [msg("user", "q", "m0"), *tool_exchange(1)]
 
-    assert summary.metadata["covered_item_ids"] == []
+    kept = SlidingWindowManager(max_messages=10, max_result_chars=100).prepare(history)
+
+    assert next(m for m in kept if m.role == "tool").content == "result 1"
+
+
+def test_truncation_can_be_turned_off():
+    history = [msg("user", "q", "m0"), *tool_exchange(1)]
+    history[2] = replace(history[2], content="x" * 500)
+
+    kept = SlidingWindowManager(
+        max_messages=10, truncate_tool_results=False
+    ).prepare(history)
+
+    assert len(next(m for m in kept if m.role == "tool").content) == 500
+
+
+def test_truncation_runs_before_dropping():
+    """Ordering is the point of folding truncation into the window.
+
+    A budget that could not fit the raw tool result can fit the truncated one,
+    so the interaction survives instead of being discarded whole.
+    """
+    history = [msg("user", "q", "m0"), *tool_exchange(1)]
+    history[2] = replace(history[2], content="x" * 4000)
+
+    kept = SlidingWindowManager(
+        max_tokens=200,
+        token_counter=CharTokenCounter(),
+        max_result_chars=100,
+    ).prepare(history)
+
+    assert [m.id for m in kept] == ["m0", "a1", "t1"]
 
 
 # ---------------------------------------------------------------------------
@@ -416,3 +437,64 @@ def test_summarizing_keep_recent_must_be_under_trigger():
         SummarizingManager(
             model=CountingModel(), keep_recent_messages=6, trigger_message_count=4
         )
+
+
+# ---------------------------------------------------------------------------
+# reduce_context — recovery after the model says no
+# ---------------------------------------------------------------------------
+
+
+def test_reduce_context_halves_a_message_window():
+    history = [msg("user", f"turn {i}", f"m{i}") for i in range(10)]
+    manager = SlidingWindowManager(max_messages=8)
+
+    normal = manager.prepare(history)
+    reduced = manager.reduce_context(history, None, RuntimeError("too long"))
+
+    assert len(reduced) < len(normal)
+
+
+def test_reduce_context_halves_a_token_window():
+    history = [msg("user", "x" * 100, f"m{i}") for i in range(10)]
+    manager = SlidingWindowManager(max_tokens=200, token_counter=CharTokenCounter())
+
+    normal = manager.prepare(history)
+    reduced = manager.reduce_context(history, None, RuntimeError("too long"))
+
+    assert len(reduced) < len(normal)
+
+
+def test_reduce_context_does_not_mutate_the_manager():
+    """Reduction applies to one retry, not to every later call."""
+    history = [msg("user", f"turn {i}", f"m{i}") for i in range(10)]
+    manager = SlidingWindowManager(max_messages=8)
+
+    before = manager.prepare(history)
+    manager.reduce_context(history, None, RuntimeError("too long"))
+    after = manager.prepare(history)
+
+    assert [m.id for m in before] == [m.id for m in after]
+
+
+def test_null_manager_reraises_rather_than_pretending():
+    """A manager that declines to manage cannot rescue an overflow."""
+    error = RuntimeError("context length exceeded")
+    with pytest.raises(RuntimeError):
+        NullConversationManager().reduce_context([], None, error)
+
+
+def test_summarizing_reduce_context_summarizes_below_its_trigger():
+    """The trigger already failed to fire in time, so waiting again is not an option."""
+    model = CountingModel()
+    manager = SummarizingManager(
+        model=model, keep_recent_messages=4, trigger_message_count=100
+    )
+    history = [msg("user", f"turn {i}", f"m{i}") for i in range(6)]
+
+    assert manager.prepare(history) == history  # trigger not reached
+    assert model.calls == 0
+
+    reduced = manager.reduce_context(history, None, RuntimeError("too long"))
+
+    assert model.calls == 1
+    assert reduced[0].metadata["kind"] == "conversation_summary"
