@@ -3,14 +3,17 @@ from __future__ import annotations
 from sophons.tools.agent import AgentTool, Runnable
 from sophons.tools.base import AsyncTool, Tool, ToolArgs, ToolResult, ToolSchema
 from sophons.tools.decorator import FunctionTool, build_args_schema, tool
+from sophons.tools.memory import AddMemoryTool, SearchMemoryTool
 from sophons.tools.retriever import RetrieverTool
 
 __all__ = [
+    "AddMemoryTool",
     "AgentTool",
     "AsyncTool",
     "FunctionTool",
     "RetrieverTool",
     "Runnable",
+    "SearchMemoryTool",
     "Tool",
     "ToolArgs",
     "ToolResult",

@@ -25,6 +25,7 @@ from sophons.memory.long_term.serialization import (
     entry_to_dict,
 )
 from sophons.memory.long_term.storage import InMemoryStorage, MemoryStorage
+from sophons.memory.long_term.sqlite import SQLiteMemoryStorage
 from sophons.memory.long_term.store import MemoryRetriever, MemoryStore, NamespaceAccessError
 from sophons.memory.manager import MemoryManager, MemoryStoreConfig
 from sophons.memory.reflection import MemoryReflector, ReflectionResult
@@ -45,6 +46,7 @@ __all__ = [
     # Storage
     "InMemoryStorage",
     "MemoryStorage",
+    "SQLiteMemoryStorage",
     # Store
     "MemoryRetriever",
     "MemoryStore",

@@ -26,6 +26,7 @@ from sophons.agents.hooks import (
     MessageAdded,
 )
 from sophons.agents.loop import AgentLoop
+from sophons.agents.memory import MemoryConfig, NamespaceResolver
 from sophons.agents.responses import (
     AgentMetrics,
     AgentResult,
@@ -58,6 +59,8 @@ __all__ = [
     # Agent
     "Agent",
     "AgentLoop",
+    "MemoryConfig",
+    "NamespaceResolver",
     # Responses
     "AgentMetrics",
     "AgentResult",

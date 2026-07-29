@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 from sophons.memory.extraction.interface import (
     MemoryExtractionRequest,
@@ -17,6 +19,8 @@ from sophons.models.messages import Message
 from sophons.observability import _semconv
 
 _TRACER = trace.get_tracer("sophons.memory")
+
+NamespaceResolver = Callable[[str, str | None], tuple[str, ...]]
 
 
 # ---------------------------------------------------------------------------
@@ -81,12 +85,45 @@ class MemoryManager:
         stores: list[MemoryStoreConfig],
         extractor: MemoryExtractor | None = None,
         reflector: MemoryReflector | None = None,
+        *,
+        namespace: tuple[str, ...] | None = None,
+        namespace_resolver: NamespaceResolver | None = None,
+        inject: bool = True,
+        inject_limit: int = 5,
+        extract_after_run: bool = True,
+        add_search_tool: bool = False,
+        add_write_tool: bool = False,
+        context_header: str = "Relevant long-term memory:",
     ) -> None:
         if not stores:
             raise ValueError("MemoryManager requires at least one store.")
         self._stores = stores
         self._extractor = extractor
         self._reflector = reflector
+        self._agent_config: dict[str, Any] = {
+            "namespace": namespace,
+            "namespace_resolver": namespace_resolver,
+            "inject": inject,
+            "inject_limit": inject_limit,
+            "extract_after_run": extract_after_run,
+            "add_search_tool": add_search_tool,
+            "add_write_tool": add_write_tool,
+            "context_header": context_header,
+        }
+
+    def agent_config(self) -> dict[str, Any]:
+        """
+        Return default Agent memory behavior for this manager.
+
+        This keeps the public API compact for the common case::
+
+            memory = MemoryManager(stores=[...], namespace=("user", "alice"))
+            agent = Agent(model=my_model, memory_manager=memory)
+
+        ``Agent`` still accepts an explicit ``MemoryConfig`` when applications
+        need per-agent overrides.
+        """
+        return dict(self._agent_config)
 
     # ------------------------------------------------------------------
     # add — extract + store (primary write path)
@@ -220,6 +257,24 @@ class MemoryManager:
                     results.append(entry)
 
         return results[:limit]
+
+    async def remember(self, entry: MemoryEntry) -> MemoryEntry:
+        """
+        Store one explicit memory entry in all writable stores.
+
+        This is the direct-write counterpart to ``add()``, intended for tools
+        or application code that already knows the durable memory to save and
+        does not need extraction from a conversation transcript.
+        """
+        with _TRACER.start_as_current_span(
+            "memory.write_explicit",
+            attributes={_semconv.NAMESPACE: "/".join(entry.namespace)},
+        ) as span:
+            for config in self._stores:
+                if config.writable:
+                    config.store.put(entry)
+            span.set_attribute(_semconv.ENTRY_COUNT, 1)
+            return entry
 
     # ------------------------------------------------------------------
     # reflect — explicit reflection pass

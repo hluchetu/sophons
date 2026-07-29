@@ -38,16 +38,26 @@ long-term memory, and retrieval — so you focus on what your agent actually doe
 
 ```python
 from sophons.agents import Agent
-from sophons.memory import MemoryManager, MemoryStore, MemoryStoreConfig, InMemoryStorage, LexicalRetriever
+from sophons.memory import (
+    InMemoryStorage,
+    LexicalRetriever,
+    MemoryManager,
+    MemoryStore,
+    MemoryStoreConfig,
+)
 
 # Wire up memory
 store = MemoryStore(storage=InMemoryStorage(), retrievers=[LexicalRetriever()])
 memory = MemoryManager(
-    stores=[MemoryStoreConfig(name="main", description="main memory", store=store)]
+    stores=[MemoryStoreConfig(name="main", description="main memory", store=store)],
+    namespace=("user", "alice"),
 )
 
 # Create an agent (bring your own model adapter)
-agent = Agent(model=my_model)
+agent = Agent(
+    model=my_model,
+    memory_manager=memory,
+)
 
 # Run
 result = await agent.run("What is the capital of France?")

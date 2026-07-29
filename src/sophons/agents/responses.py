@@ -68,7 +68,7 @@ class AgentMetrics:
 @dataclass
 class AgentResult:
     """
-    The full result of an agent run — mirrors Strands AgentResult.
+    The full result of an agent run.
     Returned by agent.run() to the developer.
     """
 

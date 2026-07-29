@@ -1,1 +1,108 @@
+---
+title: Memory
+description: Long-term memory, session history, retrieval, and agent integration.
+---
 
+# Memory
+
+Sophons separates **session history** from **long-term memory**.
+
+Session history is the exact message list for a run or chat session. It lets an
+agent resume a conversation, but it grows over time and eventually has to be
+trimmed or summarized before the model call.
+
+Long-term memory stores durable facts extracted from interactions: preferences,
+decisions, procedures, entities, semantic facts, and specific events. Before a
+run, relevant memories are retrieved and injected into the current turn. After a
+run, new durable facts can be extracted and saved.
+
+## First-class agent memory
+
+```python
+from sophons.agents import Agent
+from sophons.memory import (
+    InMemoryStorage,
+    LexicalRetriever,
+    MemoryManager,
+    MemoryStore,
+    MemoryStoreConfig,
+)
+
+store = MemoryStore(
+    storage=InMemoryStorage(),
+    retrievers=[LexicalRetriever()],
+)
+memory = MemoryManager(
+    stores=[MemoryStoreConfig(name="main", description="user memory", store=store)],
+    namespace=("user", "alice"),
+)
+
+agent = Agent(
+    model=my_model,
+    memory_manager=memory,
+)
+
+result = await agent.run("Explain this from first principles.")
+```
+
+With this configuration the agent:
+
+- searches memory before the run
+- injects relevant memories into the current user turn
+- runs the model
+- extracts durable memories after the run when an extractor is configured
+
+For applications that need per-agent overrides, pass an explicit
+`MemoryConfig` to `Agent`. Otherwise, the manager defaults are enough for the
+common compact path.
+
+## Memory tools
+
+Applications can also give the model direct memory tools:
+
+```python
+from sophons.agents import MemoryConfig
+
+agent = Agent(
+    model=my_model,
+    memory_manager=memory,
+    memory_config=MemoryConfig(
+        namespace=("user", "alice"),
+        add_search_tool=True,
+        add_write_tool=True,
+    ),
+)
+```
+
+This registers `search_memory` and `add_memory`, similar to professional agent
+frameworks where recall is available by tool and writes are opt-in.
+
+The compact form is also available:
+
+```python
+memory = MemoryManager(
+    stores=[MemoryStoreConfig(name="main", description="user memory", store=store)],
+    namespace=("user", "alice"),
+    add_search_tool=True,
+    add_write_tool=True,
+)
+
+agent = Agent(model=my_model, memory_manager=memory)
+```
+
+## Persistent storage
+
+Use `SQLiteMemoryStorage` when memory should survive process restarts:
+
+```python
+from sophons.memory import SQLiteMemoryStorage
+
+store = MemoryStore(
+    storage=SQLiteMemoryStorage(".sophons/memory.sqlite"),
+    retrievers=[LexicalRetriever()],
+)
+```
+
+The storage contract is still protocol-based, so production applications can
+bring Postgres, Redis, vector databases, or managed services behind the same
+`MemoryStorage` interface.

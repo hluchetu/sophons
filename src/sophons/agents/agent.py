@@ -10,12 +10,15 @@ from pydantic import BaseModel
 from sophons.agents.conversation import ConversationManager, TokenCounter
 from sophons.agents.hooks import HookCallback, HookEventT, HookRegistry
 from sophons.agents.loop import AgentLoop
+from sophons.agents.memory import MemoryConfig
 from sophons.agents.responses import AgentResult
 from sophons.agents.retry import RetryStrategy, exponential_backoff
 from sophons.agents.session import InMemorySessionManager, SessionManager
 from sophons.agents.state import RunLimits
 from sophons.guardrails import Guardrail, GuardrailChain
 from sophons.guardrails.approval import Approver
+from sophons.memory import MemoryManager
+from sophons.models.messages import Message
 from sophons.tools.base import AsyncTool, Tool
 
 logger = logging.getLogger(__name__)
@@ -76,11 +79,19 @@ class Agent:
         limits: RunLimits | None = None,
         guardrails: GuardrailChain | list[Guardrail] | None = None,
         approver: Approver | None = None,
+        memory_manager: MemoryManager | None = None,
+        memory_config: MemoryConfig | None = None,
     ) -> None:
         self._session_manager = session_manager or InMemorySessionManager()
         self._hooks = hooks or HookRegistry()
+        self._memory_manager = memory_manager
+        self._memory_config = self._resolve_memory_config(
+            memory_manager,
+            memory_config,
+        )
         if isinstance(guardrails, list):
             guardrails = GuardrailChain(guardrails)
+        tools = self._with_memory_tools(tools)
         self._loop = AgentLoop(
             model=model,
             tools=tools,
@@ -121,14 +132,18 @@ class Agent:
             and any tool activity from this run.
         """
         prior_messages = await self._load_session(session_id)
+        namespace = self._memory_namespace(input, session_id)
+        memory_context = await self._memory_context(input, namespace)
+        loop_input = self._with_memory_context(input, memory_context)
 
         result = await self._loop.run(
-            input,
+            loop_input,
             session_id=session_id,
             messages=prior_messages,
         )
 
         await self._save_session(session_id, prior_messages, input, result)
+        await self._add_memory(input, result, namespace)
         return result
 
     def run_sync(
@@ -176,6 +191,97 @@ class Agent:
     def add_hook(self, callback: HookCallback[HookEventT]) -> None:
         """Register a lifecycle hook by inferring its event annotation."""
         self._hooks.add(callback)
+
+    # ------------------------------------------------------------------
+    # Memory helpers
+    # ------------------------------------------------------------------
+
+    def _resolve_memory_config(
+        self,
+        memory_manager: MemoryManager | None,
+        memory_config: MemoryConfig | None,
+    ) -> MemoryConfig:
+        if memory_config is not None:
+            return memory_config
+        if memory_manager is not None:
+            return MemoryConfig(**memory_manager.agent_config())
+        return MemoryConfig()
+
+    def _with_memory_tools(
+        self, tools: list[Tool | AsyncTool] | None
+    ) -> list[Tool | AsyncTool] | None:
+        if self._memory_manager is None:
+            return tools
+        if not (
+            self._memory_config.add_search_tool
+            or self._memory_config.add_write_tool
+        ):
+            return tools
+
+        from sophons.tools.memory import AddMemoryTool, SearchMemoryTool
+
+        configured = list(tools or [])
+        namespace = self._memory_config.namespace
+        if namespace is None:
+            # Dynamic namespaces are resolved per run for automatic injection and
+            # extraction. Tools need a stable scope because model calls do not
+            # pass session metadata into tool arguments.
+            return configured
+        if self._memory_config.add_search_tool:
+            configured.append(SearchMemoryTool(self._memory_manager, namespace))
+        if self._memory_config.add_write_tool:
+            configured.append(AddMemoryTool(self._memory_manager, namespace))
+        return configured
+
+    def _memory_namespace(
+        self, input: str, session_id: str | None
+    ) -> tuple[str, ...] | None:
+        if self._memory_manager is None:
+            return None
+        return self._memory_config.resolve_namespace(input, session_id)
+
+    async def _memory_context(
+        self,
+        input: str,
+        namespace: tuple[str, ...] | None,
+    ) -> str:
+        if (
+            self._memory_manager is None
+            or namespace is None
+            or not self._memory_config.inject
+        ):
+            return ""
+        return await self._memory_manager.format_context(
+            query=input,
+            namespace=namespace,
+            limit=self._memory_config.inject_limit,
+        )
+
+    def _with_memory_context(self, input: str, memory_context: str) -> str:
+        if not memory_context:
+            return input
+        return (
+            f"{self._memory_config.context_header}\n"
+            f"{memory_context}\n\n"
+            f"Current user message:\n{input}"
+        )
+
+    async def _add_memory(
+        self,
+        user_input: str,
+        result: AgentResult,
+        namespace: tuple[str, ...] | None,
+    ) -> None:
+        if (
+            self._memory_manager is None
+            or namespace is None
+            or not self._memory_config.extract_after_run
+        ):
+            return
+        messages = [Message(role="user", content=user_input)]
+        if result.message:
+            messages.append(Message(role="assistant", content=result.message))
+        await self._memory_manager.add(messages=messages, namespace=namespace)
 
     # ------------------------------------------------------------------
     # Session helpers
