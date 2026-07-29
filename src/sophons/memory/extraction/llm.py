@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import Any
@@ -10,7 +11,7 @@ from sophons.memory.extraction.interface import (
 )
 from sophons.memory.extraction.triggers import AlwaysTrigger, ExtractionTrigger
 from sophons.memory.long_term.entry import MemoryEntry, MemoryType
-from sophons.models.chat import AsyncChatModel
+from sophons.models.chat import AsyncChatModel, ChatModel
 from sophons.models.messages import Message
 
 
@@ -88,7 +89,7 @@ class LLMMemoryExtractor:
             memory_store.put(entry)
 
     Args:
-        model:   Async chat model used for extraction.
+        model:   Sync or async chat model used for extraction.
         trigger: Optional gate — if the trigger returns ``False`` the
                  extractor skips the LLM call and returns an empty result.
                  Defaults to ``AlwaysTrigger`` (always extract).
@@ -96,7 +97,7 @@ class LLMMemoryExtractor:
 
     def __init__(
         self,
-        model: AsyncChatModel,
+        model: ChatModel | AsyncChatModel,
         trigger: ExtractionTrigger | None = None,
     ) -> None:
         self._model = model
@@ -123,12 +124,14 @@ class LLMMemoryExtractor:
             conversation=_format_messages(request.messages),
         )
 
-        response = await self._model.invoke(
+        response = self._model.invoke(
             [
                 Message(role="system", content=_SYSTEM_PROMPT),
                 Message(role="user", content=user_content),
             ]
         )
+        if asyncio.iscoroutine(response):
+            response = await response
 
         try:
             payload = _parse_json(response.content)
