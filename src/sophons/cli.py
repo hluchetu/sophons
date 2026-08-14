@@ -1,26 +1,37 @@
-"""Terminal UI for sophons examples and agents — panels, history, spinner.
+"""Terminal UI for Sophons agents — panels, history, and spinners.
 
-Requires the ``cli`` extra: ``pip install 'sophons[cli]'``.
+Requires the ``cli`` extra:
 
-Primitives (the house style, one panel per event):
+    pip install 'sophons[cli]'
+
+Primitives follow the house style of one panel per event:
 
     from sophons.cli import ui
 
-    ui.header("hybrid.py", subtitle="bm25 vs semantic vs RRF")
+    ui.header("hybrid.py", subtitle="BM25 vs semantic vs RRF")
     ui.user("How much is FEE-WDR-021?")
-    ui.tool("bm25: #1 · semantic: #3 · hybrid: #2")
+    ui.tool("BM25: #1 · semantic: #3 · hybrid: #2")
     ui.agent("The fee is KES 110.", footer="sources: fees.md")
 
-Loops built on the primitives:
+Synchronous chat loops:
 
-- ``chat(title=..., answer=...)`` — bring your own answer function.
-- ``chat_with_agent(agent, title=...)`` — wires a sophons Agent in;
-  the footer shows run metrics automatically.
+- ``chat(title=..., answer=...)`` — run a chat loop with your own
+  synchronous answer function.
+- ``chat_with_agent(agent, title=...)`` — run a chat loop with a
+  Sophons agent and display its run metrics automatically.
+
+Asynchronous chat loops:
+
+- ``async_chat(title=..., answer=...)`` — run a chat loop with your own
+  asynchronous answer function.
+- ``async_chat_with_agent(agent, title=...)`` — run a chat loop with a
+  Sophons agent using ``await agent.run(...)`` and display its run
+  metrics automatically.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -197,3 +208,89 @@ def chat_with_agent(
         return result.message, footer
 
     chat(title=title, subtitle=subtitle, answer=answer, history_name=history_name)
+
+
+async def async_chat(
+    *,
+    title: str,
+    subtitle: str = "",
+    answer: Callable[[str], Awaitable[tuple[str, str]]],
+    history_name: str = "sophons_chat",
+) -> None:
+    """Run an asynchronous chat loop in the terminal.
+
+    ``await answer(question)`` returns ``(text, footer)``; the footer shows in
+    the agent panel (sources, metrics, anything).
+    """
+    try:
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.history import FileHistory
+        from prompt_toolkit.styles import Style
+    except ImportError as exc:
+        raise MissingDependencyError(
+            _INSTALL_HINT, details={"extra": "cli"}
+        ) from exc
+
+    style = Style.from_dict({"prompt": f"bold {UI._BLUE}"})
+    ui.header(title, subtitle=subtitle)
+    ui.note("Type a question. exit or Ctrl+C to quit.")
+
+    session = PromptSession(
+        history=FileHistory(str(Path.home() / f".{history_name}")),
+        style=style,
+    )
+
+    while True:
+        try:
+            question = (
+                await session.prompt_async("  You › ", style=style)
+            ).strip()
+        except (KeyboardInterrupt, EOFError):
+            ui.note("Goodbye.")
+            break
+        if not question:
+            continue
+        if question.lower() in {"exit", "quit", "/exit", "/quit"}:
+            ui.note("Goodbye.")
+            break
+
+        ui.console.print()
+        ui.user(question)
+        ui.console.print()
+
+        try:
+            with ui.status("Thinking..."):
+                text, footer = await answer(question)
+            ui.agent(text, footer=footer)
+            ui.console.print()
+        except KeyboardInterrupt:
+            ui.note("Cancelled.")
+        except Exception as exc:  # surface, keep chatting
+            ui.console.print(f"\n[bold red]Error:[/bold red] {exc}\n")
+
+
+async def async_chat_with_agent(
+    agent: Any,
+    *,
+    title: str,
+    subtitle: str = "",
+    session_id: str | None = "chat",
+    history_name: str = "sophons_chat",
+) -> None:
+    """Chat asynchronously with a Sophons Agent and show run metrics."""
+
+    async def answer(question: str) -> tuple[str, str]:
+        result = await agent.run(question, session_id=session_id)
+        m = result.metrics
+        footer = (
+            f"steps={m.steps}  model_calls={m.model_calls}  "
+            f"tool_calls={m.tool_calls}"
+        )
+        return result.message, footer
+
+    await async_chat(
+        title=title,
+        subtitle=subtitle,
+        answer=answer,
+        history_name=history_name,
+    )
