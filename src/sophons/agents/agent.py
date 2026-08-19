@@ -3,8 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from typing import Any
-
 from pydantic import BaseModel
 
 from sophons.agents.conversation import ConversationManager, TokenCounter
@@ -18,6 +16,7 @@ from sophons.agents.state import RunLimits
 from sophons.guardrails import Guardrail, GuardrailChain
 from sophons.guardrails.approval import Approver
 from sophons.memory import MemoryManager
+from sophons.models.chat import AsyncChatModel, ChatModel
 from sophons.models.messages import Message
 from sophons.tools.base import AsyncTool, Tool
 
@@ -67,7 +66,7 @@ class Agent:
     def __init__(
         self,
         *,
-        model: Any,
+        model: ChatModel | AsyncChatModel,
         tools: list[Tool | AsyncTool] | None = None,
         output_type: type[BaseModel] | None = None,
         system_prompt: str | None = None,

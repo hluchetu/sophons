@@ -40,6 +40,7 @@ from sophons.agents.state import RunLimits, RunState
 from sophons.errors import is_context_overflow
 from sophons.guardrails import GuardrailChain, GuardrailContext
 from sophons.guardrails.approval import ApprovalRequest, Approver
+from sophons.models.chat import AsyncChatModel, ChatModel
 from sophons.models.messages import Message
 from sophons.observability import _semconv
 from sophons.tools.base import AsyncTool, Tool
@@ -84,7 +85,7 @@ class AgentLoop:
     def __init__(
         self,
         *,
-        model: Any,
+        model: ChatModel | AsyncChatModel,
         tools: list[Tool | AsyncTool] | None = None,
         output_type: type[BaseModel] | None = None,
         system_prompt: str | None = None,
