@@ -54,12 +54,18 @@ class HybridRetriever:
             for retriever in self._retrievers:
                 results = retriever.retrieve(query, limit=fetch)
                 for rank, document in enumerate(results):
+                    if document.id is None:
+                        raise ValueError(
+                            "HybridRetriever requires every document to have an ID."
+                        )
                     scores[document.id] = scores.get(document.id, 0.0) + 1.0 / (
                         self._k + rank + 1
                     )
                     documents.setdefault(document.id, document)
 
-            fused = sorted(scores, key=lambda doc_id: scores[doc_id], reverse=True)
+            # The identifier makes equal-score ordering reproducible regardless
+            # of retriever implementation or insertion order.
+            fused = sorted(scores, key=lambda doc_id: (-scores[doc_id], doc_id))
             top = [documents[doc_id] for doc_id in fused[:limit]]
             span.set_attribute(_semconv.RESULT_COUNT, len(top))
             return top

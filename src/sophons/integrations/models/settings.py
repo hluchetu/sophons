@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from dataclasses import dataclass, field
 
 
-class ModelSettings(BaseModel):
+@dataclass(frozen=True, slots=True)
+class ModelSettings:
     temperature: float = 0.0
     max_tokens: int = 2048
     timeout_seconds: float = 120.0
-    extra: dict[str, object] = Field(default_factory=dict)
+    extra: dict[str, object] = field(default_factory=dict)

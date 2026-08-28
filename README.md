@@ -45,13 +45,21 @@ sophons/
 ## Install For Local Development
 
 ```bash
-pip install -e .
+uv sync --group dev
 ```
 
 Run tests:
 
 ```bash
-python -m pytest
+uv run python -m pytest
+```
+
+Install an optional embedding provider when needed:
+
+```bash
+uv sync --group dev --extra openai
+# or
+uv sync --group dev --extra sentence-transformers
 ```
 
 ## Core Types
@@ -74,6 +82,143 @@ message = Message(
 `Document` is for knowledge/context.
 
 `Message` is for model and agent conversation.
+
+## Embeddings
+
+`sophons.embeddings` is the stable public embedding API. Core protocols are
+always available, while provider integrations and their SDKs are loaded only
+when requested.
+
+```python
+from sophons.embeddings import EmbeddingModel, OpenAIEmbeddings
+
+embedder: EmbeddingModel = OpenAIEmbeddings(
+    api_key="...",
+    model="text-embedding-3-small",
+)
+
+query_vector = embedder.embed_query("How does token refresh work?")
+document_vectors = embedder.embed_documents([
+    "Token refresh happens every 60 minutes.",
+    "Sessions expire after 24 hours.",
+])
+```
+
+For asynchronous applications:
+
+```python
+from sophons.embeddings import AsyncOpenAIEmbeddings
+
+embedder = AsyncOpenAIEmbeddings(api_key="...")
+query_vector = await embedder.embed_query("How does token refresh work?")
+```
+
+Applications should import from `sophons.embeddings`, not from internal
+`sophons.integrations` modules. Provider packages remain optional: importing
+the public namespace does not import OpenAI or Sentence Transformers.
+
+Sentence Transformers can return L2-normalized vectors when the consuming
+application uses cosine similarity or dot product over unit vectors:
+
+```python
+from sophons.embeddings import SentenceTransformerEmbeddings
+
+embedder = SentenceTransformerEmbeddings(
+    model="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+    normalize=True,
+)
+```
+
+Normalization is explicit and disabled by default so Sophons does not impose a
+similarity policy on every consumer.
+
+## Models
+
+`sophons.models` is also the stable public API for chat-model contracts,
+messages, settings, and provider implementations. Provider SDKs are loaded only
+when their model is constructed.
+
+Install DeepSeek support:
+
+```bash
+uv sync --group dev --extra deepseek
+```
+
+Then create the model through the public API:
+
+```python
+from sophons.models import DeepSeekModel, Message
+
+model = DeepSeekModel(
+    model="deepseek-chat",
+    api_key="...",
+)
+
+response = model.invoke([
+    Message(role="user", content="Explain Article 43."),
+])
+```
+
+The provider-independent `ChatModel` protocol remains available from the same
+namespace:
+
+```python
+from sophons.models import ChatModel, DeepSeekModel
+
+model: ChatModel = DeepSeekModel(
+    model="deepseek-chat",
+    api_key="...",
+)
+```
+
+Applications should prefer `sophons.models` over internal
+`sophons.integrations.models` imports.
+
+## Vector Stores
+
+`sophons.stores` is the stable public API for vector-store contracts and
+implementations. The in-memory store has no optional dependency:
+
+```python
+from sophons.stores import InMemoryVectorStore, VectorStore
+
+store: VectorStore = InMemoryVectorStore()
+```
+
+Chroma remains optional and is loaded only when constructed:
+
+```bash
+uv sync --extra chroma
+```
+
+```python
+from sophons.stores import ChromaVectorStore
+
+store = ChromaVectorStore(
+    collection="katiba",
+    path="./katiba_index",
+)
+```
+
+Applications should prefer `sophons.stores` over internal
+`sophons.integrations.vector_stores` imports.
+
+For exact cosine search over an existing NumPy matrix:
+
+```bash
+uv sync --extra numpy
+```
+
+```python
+from sophons.stores import NumPyVectorStore
+
+store = NumPyVectorStore()
+store.add_matrix(documents, vectors)
+results = store.search(query_vector, limit=10)
+```
+
+`NumPyVectorStore` keeps vectors as a `float32` matrix and performs bulk cosine
+search without converting the matrix to nested Python lists.
 
 ## Retriever Pattern
 

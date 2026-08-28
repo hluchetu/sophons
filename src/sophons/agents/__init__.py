@@ -27,6 +27,7 @@ from sophons.agents.hooks import (
 )
 from sophons.agents.loop import AgentLoop
 from sophons.agents.memory import MemoryConfig, NamespaceResolver
+from sophons.agents.output import OutputTool
 from sophons.agents.responses import (
     AgentMetrics,
     AgentResult,
@@ -61,6 +62,7 @@ __all__ = [
     "AgentLoop",
     "MemoryConfig",
     "NamespaceResolver",
+    "OutputTool",
     # Responses
     "AgentMetrics",
     "AgentResult",

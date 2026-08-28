@@ -26,7 +26,7 @@ class VectorStore(Protocol):
     """
     Contract for a vector similarity store scoped to Documents.
 
-    Concrete implementations live in ``sophons.integrations.vector_stores``.
+    Concrete implementations are exposed publicly from ``sophons.stores``.
     """
 
     def add(self, documents: list[Document], vectors: list[list[float]]) -> None:

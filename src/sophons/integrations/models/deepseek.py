@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import json
 
-from openai import OpenAI
-
 from sophons.integrations.models.adapters.openai_compat import OpenAICompatAdapter
 from sophons.models.messages import Message
 from sophons.tools.base import Tool
@@ -18,6 +16,14 @@ class DeepSeekModel:
         thinking: bool = False,
         context_window: int | None = None,
     ) -> None:
+        try:
+            from openai import OpenAI
+        except ImportError as exc:
+            raise ImportError(
+                "DeepSeekModel requires the 'deepseek' extra. "
+                "Install it with: uv sync --extra deepseek"
+            ) from exc
+
         self.model = model
         # Total context size in tokens, read by ratio-based conversation
         # managers. Left unset by default rather than guessed: the figure

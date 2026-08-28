@@ -54,9 +54,26 @@ def test_single_retriever_preserves_its_order() -> None:
     assert [d.id for d in results] == ["x", "y", "z"]
 
 
+def test_equal_scores_tie_break_by_document_id() -> None:
+    results = HybridRetriever(
+        [Scripted(["z"]), Scripted(["a"])],
+    ).retrieve("q", limit=2)
+
+    assert [document.id for document in results] == ["a", "z"]
+
+
 def test_empty_retriever_list_raises() -> None:
     with pytest.raises(ValueError, match="at least one"):
         HybridRetriever([])
+
+
+def test_document_without_id_is_refused() -> None:
+    class MissingId:
+        def retrieve(self, query: str, *, limit: int = 10) -> list[Document]:
+            return [Document(content="unidentified")]
+
+    with pytest.raises(ValueError, match="document to have an ID"):
+        HybridRetriever([MissingId()]).retrieve("q")
 
 
 def test_satisfies_retriever_protocol() -> None:

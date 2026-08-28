@@ -1,9 +1,13 @@
 from __future__ import annotations
 
-from sophons.integrations.vector_stores.chroma import ChromaVectorStore
-from sophons.integrations.vector_stores.in_memory import InMemoryVectorStore
+import lazy_loader as lazy
 
-__all__ = [
-    "ChromaVectorStore",
-    "InMemoryVectorStore",
-]
+
+__getattr__, __dir__, __all__ = lazy.attach(
+    __name__,
+    submod_attrs={
+        "chroma": ["ChromaVectorStore"],
+        "in_memory": ["InMemoryVectorStore"],
+        "numpy": ["NumPyVectorStore"],
+    },
+)

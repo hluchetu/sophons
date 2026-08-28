@@ -90,6 +90,11 @@ class ChromaVectorStore:
 
     def delete(self, ids: list[str]) -> None:
         """Remove documents by their IDs."""
+        if ids:
+            self._collection.delete(ids=ids)
+
+    def delete(self, ids: list[str]) -> None:
+        """Remove documents by their IDs."""
         self._collection.delete(ids=ids)
 
     def count(self) -> int:
