@@ -1,7 +1,20 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
+from sophons.errors import (
+    ContextWindowOverflowError,
+    ModelAuthenticationError,
+    ModelAuthorizationError,
+    ModelError,
+    ModelInvalidRequestError,
+    ModelResponseError,
+    ModelThrottledError,
+    ModelTimeoutError,
+    ModelUnavailableError,
+    is_context_overflow,
+)
 from sophons.integrations.models.adapters.openai_compat import OpenAICompatAdapter
 from sophons.models.messages import Message
 from sophons.tools.base import Tool
@@ -49,8 +62,12 @@ class DeepSeekModel:
         if tools:
             kwargs["tools"] = self._adapter.serialize_tools(tools)
 
-        response = self._client.chat.completions.create(**kwargs)
-        message = response.choices[0].message
+        try:
+            response = self._client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            raise _translate_error(exc, model=self.model) from exc
+
+        message = _extract_message(response, model=self.model)
 
         tool_calls = _normalize_tool_calls(getattr(message, "tool_calls", None) or [])
         metadata = {"tool_calls": tool_calls} if tool_calls else {}
@@ -71,6 +88,85 @@ class DeepSeekModel:
         return Message(
             role="assistant", content=message.content or "", metadata=metadata
         )
+
+
+def _translate_error(error: Exception, *, model: str) -> ModelError:
+    error_name = type(error).__name__
+    status_code = getattr(error, "status_code", None)
+    request_id = getattr(error, "request_id", None)
+
+    details: dict[str, Any] = {
+        "provider": "deepseek",
+        "model": model,
+    }
+    if status_code is not None:
+        details["status_code"] = status_code
+    if request_id is not None:
+        details["request_id"] = request_id
+
+    if is_context_overflow(error):
+        return ContextWindowOverflowError(
+            "The DeepSeek request exceeded the model context window.",
+            details=details,
+        )
+    if error_name == "AuthenticationError" or status_code == 401:
+        return ModelAuthenticationError(
+            "DeepSeek authentication failed.",
+            details=details,
+        )
+    if error_name == "PermissionDeniedError" or status_code == 403:
+        return ModelAuthorizationError(
+            "DeepSeek rejected the request because permission was denied.",
+            details=details,
+        )
+    if error_name == "RateLimitError" or status_code == 429:
+        return ModelThrottledError(
+            "DeepSeek rate-limited the request.",
+            details=details,
+        )
+    if error_name == "APITimeoutError":
+        return ModelTimeoutError(
+            "The DeepSeek request timed out.",
+            details=details,
+        )
+    if error_name == "APIConnectionError":
+        return ModelUnavailableError(
+            "Could not connect to DeepSeek.",
+            details=details,
+        )
+    if error_name == "BadRequestError" or status_code == 400:
+        return ModelInvalidRequestError(
+            "DeepSeek rejected the request as invalid.",
+            details=details,
+        )
+    if error_name == "InternalServerError" or (
+        isinstance(status_code, int) and status_code >= 500
+    ):
+        return ModelUnavailableError(
+            "DeepSeek is temporarily unavailable.",
+            details=details,
+        )
+    return ModelError(
+        "The DeepSeek request failed.",
+        details={**details, "provider_error_type": error_name},
+    )
+
+
+def _extract_message(response: object, *, model: str) -> Any:
+    choices = getattr(response, "choices", None)
+    if not choices:
+        raise ModelResponseError(
+            "DeepSeek returned a response without any choices.",
+            details={"provider": "deepseek", "model": model},
+        )
+
+    message = getattr(choices[0], "message", None)
+    if message is None:
+        raise ModelResponseError(
+            "DeepSeek returned a choice without a message.",
+            details={"provider": "deepseek", "model": model},
+        )
+    return message
 
 
 def _normalize_tool_calls(raw: list) -> list[dict]:

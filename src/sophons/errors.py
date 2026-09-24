@@ -15,6 +15,15 @@ class ErrorCode(str, Enum):
     SPLITTER_ERROR = "SPLITTER_ERROR"
     TOOL_ERROR = "TOOL_ERROR"
     UNSUPPORTED_FILE_TYPE = "UNSUPPORTED_FILE_TYPE"
+    MODEL_ERROR = "MODEL_ERROR"
+    MODEL_AUTHENTICATION_ERROR = "MODEL_AUTHENTICATION_ERROR"
+    MODEL_AUTHORIZATION_ERROR = "MODEL_AUTHORIZATION_ERROR"
+    MODEL_THROTTLED_ERROR = "MODEL_THROTTLED_ERROR"
+    MODEL_TIMEOUT_ERROR = "MODEL_TIMEOUT_ERROR"
+    MODEL_UNAVAILABLE_ERROR = "MODEL_UNAVAILABLE_ERROR"
+    MODEL_INVALID_REQUEST_ERROR = "MODEL_INVALID_REQUEST_ERROR"
+    MODEL_RESPONSE_ERROR = "MODEL_RESPONSE_ERROR"
+    STRUCTURED_OUTPUT_ERROR = "STRUCTURED_OUTPUT_ERROR"
 
 
 class SophonsError(Exception):
@@ -109,7 +118,24 @@ class ToolError(SophonsError):
         super().__init__(message, error_code=ErrorCode.TOOL_ERROR, details=details)
 
 
-class ContextWindowOverflowError(SophonsError):
+class ModelError(SophonsError):
+    """Base class for model-provider failures."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_code: ErrorCode = ErrorCode.MODEL_ERROR,
+        details: dict | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            error_code=error_code,
+            details=details,
+        )
+
+
+class ContextWindowOverflowError(ModelError):
     """
     Raised when the model rejects a request for exceeding its context window.
 
@@ -161,5 +187,94 @@ class IntegrationError(SophonsError):
         super().__init__(
             message,
             error_code=ErrorCode.INTEGRATION_ERROR,
+            details=details,
+        )
+
+
+class ModelAuthenticationError(ModelError):
+    """Raised when provider credentials are invalid or missing."""
+
+    def __init__(self, message: str, *, details: dict | None = None) -> None:
+        super().__init__(
+            message,
+            error_code=ErrorCode.MODEL_AUTHENTICATION_ERROR,
+            details=details,
+        )
+
+
+class ModelAuthorizationError(ModelError):
+    """Raised when credentials lack permission for the requested operation."""
+
+    def __init__(self, message: str, *, details: dict | None = None) -> None:
+        super().__init__(
+            message,
+            error_code=ErrorCode.MODEL_AUTHORIZATION_ERROR,
+            details=details,
+        )
+
+
+class ModelThrottledError(ModelError):
+    """Raised when the provider rate-limits a request."""
+
+    def __init__(self, message: str, *, details: dict | None = None) -> None:
+        super().__init__(
+            message,
+            error_code=ErrorCode.MODEL_THROTTLED_ERROR,
+            details=details,
+        )
+
+
+class ModelTimeoutError(ModelError):
+    """Raised when a model request exceeds its configured timeout."""
+
+    def __init__(self, message: str, *, details: dict | None = None) -> None:
+        super().__init__(
+            message,
+            error_code=ErrorCode.MODEL_TIMEOUT_ERROR,
+            details=details,
+        )
+
+
+class ModelUnavailableError(ModelError):
+    """Raised when a provider or model is temporarily unavailable."""
+
+    def __init__(self, message: str, *, details: dict | None = None) -> None:
+        super().__init__(
+            message,
+            error_code=ErrorCode.MODEL_UNAVAILABLE_ERROR,
+            details=details,
+        )
+
+
+class ModelInvalidRequestError(ModelError):
+    """Raised when a provider rejects an invalid request."""
+
+    def __init__(self, message: str, *, details: dict | None = None) -> None:
+        super().__init__(
+            message,
+            error_code=ErrorCode.MODEL_INVALID_REQUEST_ERROR,
+            details=details,
+        )
+
+
+class ModelResponseError(ModelError):
+    """Raised when a provider returns a malformed or unusable response."""
+
+    def __init__(self, message: str, *, details: dict | None = None) -> None:
+        super().__init__(
+            message,
+            error_code=ErrorCode.MODEL_RESPONSE_ERROR,
+            details=details,
+        )
+
+
+class StructuredOutputError(ModelResponseError):
+    """Raised when model output cannot satisfy the requested schema."""
+
+    def __init__(self, message: str, *, details: dict | None = None) -> None:
+        ModelError.__init__(
+            self,
+            message,
+            error_code=ErrorCode.STRUCTURED_OUTPUT_ERROR,
             details=details,
         )
