@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from io import BytesIO
 
 from sophons.errors import LoaderError, MissingDependencyError
 from sophons.parsers.base import ParserDeclined
 from sophons.parsers.blob import Blob
 from sophons.parsers.elements import Element, ParsedDocument
+from sophons.parsers.ligatures import repair_ligatures
 from sophons.parsers.text import paragraphs
 
 
@@ -80,9 +82,17 @@ class PyPDFParser:
 
     name = "pypdf"
 
-    def __init__(self, *, max_pages: int = 500, allow_empty_pages: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        max_pages: int = 500,
+        allow_empty_pages: bool = False,
+        repair_ligatures: bool = True,
+    ) -> None:
         self.max_pages = max_pages
         self.allow_empty_pages = allow_empty_pages
+        # Spell out "fi", "ff" and similar glyphs the font gave no Unicode meaning.
+        self.repair_ligatures = repair_ligatures
 
     def parse(self, blob: Blob) -> ParsedDocument:
         try:
@@ -103,4 +113,12 @@ class PyPDFParser:
         if not self.allow_empty_pages and any(not text.strip() for text in pages):
             raise ParserDeclined("The PDF has pages without a text layer")
         labels = reader.page_labels if "/PageLabels" in reader.trailer["/Root"] else None
-        return page_document(blob, [(text, "pdf") for text in pages], parser=self.name, labels=labels)
+        repaired = False
+        if self.repair_ligatures:
+            pages, repaired = repair_ligatures(pages)
+        parsed = page_document(
+            blob, [(text, "pdf") for text in pages], parser=self.name, labels=labels
+        )
+        if repaired:
+            parsed = replace(parsed, quality_flags=(*parsed.quality_flags, "ligatures_repaired"))
+        return parsed
