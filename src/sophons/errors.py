@@ -6,6 +6,7 @@ from enum import Enum
 class ErrorCode(str, Enum):
     """Stable Sophons error codes for docs, logs, and integrations."""
 
+    SESSION_PERSISTENCE_ERROR = "SESSION_PERSISTENCE_ERROR"
     CONFIGURATION_ERROR = "CONFIGURATION_ERROR"
     CONTEXT_WINDOW_OVERFLOW = "CONTEXT_WINDOW_OVERFLOW"
     INTEGRATION_ERROR = "INTEGRATION_ERROR"
@@ -278,3 +279,20 @@ class StructuredOutputError(ModelResponseError):
             error_code=ErrorCode.STRUCTURED_OUTPUT_ERROR,
             details=details,
         )
+
+
+class SessionPersistenceError(SophonsError):
+    """Safe storage failure; the original exception remains chained for diagnostics."""
+
+    def __init__(self, operation: str) -> None:
+        self.operation = operation
+        messages = {
+            "initialize": "Could not initialize session storage.",
+            "load": "Could not load session history.",
+            "save": "Could not save session history.",
+            "delete": "Could not delete session history.",
+            "exists": "Could not check session history.",
+        }
+        super().__init__(messages.get(operation, "Session storage operation failed."),
+            error_code=ErrorCode.SESSION_PERSISTENCE_ERROR,
+            details={"operation": operation})

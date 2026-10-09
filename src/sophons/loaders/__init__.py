@@ -5,6 +5,7 @@ from sophons.loaders.directory import DirectoryLoader
 from sophons.loaders.docx import DocxLoader
 from sophons.loaders.file import FileLoader
 from sophons.loaders.pdf import PDFLoader
+from sophons.loaders.pdf_structure import PDFStructureLoader
 from sophons.loaders.text import TextLoader
 from sophons.loaders.web import WebPageLoader
 
@@ -15,6 +16,7 @@ __all__ = [
     "FileLoader",
     "Loader",
     "PDFLoader",
+    "PDFStructureLoader",
     "TextLoader",
     "WebPageLoader",
 ]

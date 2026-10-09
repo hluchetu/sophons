@@ -2,168 +2,148 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import stat
+import tempfile
 from pathlib import Path
 from typing import Protocol
 
+from sophons.agents.control import call_callable
+from sophons.errors import SessionPersistenceError
 from sophons.models.messages import Message
 
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# SessionManager Protocol
-# ---------------------------------------------------------------------------
-
-
 class SessionManager(Protocol):
-    """
-    Persists and restores conversation history across agent runs.
+    """Async session persistence. Missing history is empty; storage errors must raise."""
 
-    The agent loop calls ``load`` before a run to seed the message history,
-    and ``save`` after a run to persist the updated history.
-
-    Both methods are async so implementations can use any storage backend
-    — in-memory, file system, database, or a remote API — without blocking
-    the event loop.
-    """
-
-    async def load(self, session_id: str) -> list[Message]:
-        """
-        Return the message history for ``session_id``.
-
-        Returns an empty list if no session exists yet.
-        """
-        ...
-
-    async def save(self, session_id: str, messages: list[Message]) -> None:
-        """
-        Persist ``messages`` under ``session_id``, replacing any prior state.
-        """
-        ...
-
-    async def delete(self, session_id: str) -> None:
-        """
-        Delete the session for ``session_id``.
-
-        Does nothing if the session does not exist.
-        """
-        ...
-
-    async def exists(self, session_id: str) -> bool:
-        """Return True if a session exists for ``session_id``."""
-        ...
-
-
-# ---------------------------------------------------------------------------
-# InMemorySessionManager
-# ---------------------------------------------------------------------------
+    async def load(self, session_id: str) -> list[Message]: ...
+    async def save(self, session_id: str, messages: list[Message]) -> None: ...
+    async def delete(self, session_id: str) -> None: ...
+    async def exists(self, session_id: str) -> bool: ...
 
 
 class InMemorySessionManager:
-    """
-    Stores sessions in a plain dict.
-
-    Fast and requires no setup. Sessions are lost when the process exits.
-    Useful for testing and short-lived single-process applications.
-
-    All methods are async to satisfy the SessionManager Protocol even though
-    no I/O is performed.
-    """
+    """Process-local history, lost on restart; not durable application storage."""
 
     def __init__(self) -> None:
         self._store: dict[str, list[Message]] = {}
 
     async def load(self, session_id: str) -> list[Message]:
-        messages = self._store.get(session_id, [])
-        logger.debug("session=%s loaded %d messages", session_id, len(messages))
-        return list(messages)
+        return list(self._store.get(session_id, []))
 
     async def save(self, session_id: str, messages: list[Message]) -> None:
         self._store[session_id] = list(messages)
-        logger.debug("session=%s saved %d messages", session_id, len(messages))
 
     async def delete(self, session_id: str) -> None:
         self._store.pop(session_id, None)
-        logger.debug("session=%s deleted", session_id)
 
     async def exists(self, session_id: str) -> bool:
         return session_id in self._store
 
     def session_ids(self) -> list[str]:
-        """Return all active session IDs. Convenience method for inspection."""
         return list(self._store.keys())
 
 
-# ---------------------------------------------------------------------------
-# FileSessionManager
-# ---------------------------------------------------------------------------
-
-
 class FileSessionManager:
-    """
-    Persists sessions as JSON files on disk.
+    """JSON history with atomic file replacement and explicit storage failures.
 
-    Each session is stored as a single JSON file at::
-
-        {directory}/{session_id}.json
-
-    Sessions survive process restarts. Multiple processes sharing the same
-    directory should not write the same session concurrently — no locking
-    is provided.
-
-    Args:
-        directory: Path to the directory where session files are stored.
-                   Created automatically if it does not exist.
+    No cross-process revision locking is provided: concurrent writers are still
+    last-writer-wins. Applications needing concurrency control should use a
+    transactional repository. File fsync does not promise complete power-loss
+    durability on every filesystem. No plaintext session contents are logged.
     """
 
     def __init__(self, directory: str | Path) -> None:
         self._dir = Path(directory)
-        self._dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self._dir.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise SessionPersistenceError("initialize") from error
 
     async def load(self, session_id: str) -> list[Message]:
-        path = self._path(session_id)
-        if not path.exists():
-            return []
+        return await call_callable(self._load_file, session_id)
+
+    def _load_file(self, session_id: str) -> list[Message]:
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            messages = [Message.from_dict(m) for m in data]
-            logger.debug(
-                "session=%s path=%s loaded %d messages",
-                session_id,
-                path,
-                len(messages),
-            )
+            self._check_directory("load")
+            text = self._path(session_id).read_text(encoding="utf-8")
+        except FileNotFoundError:
+            self._check_directory("load")
+            return []  # A genuinely new session, not an unavailable store.
+        except Exception as error:
+            raise SessionPersistenceError("load") from error
+        try:
+            data = json.loads(text)
+            if not isinstance(data, list):
+                raise ValueError("Session history must be a list")
+            messages = [Message.from_dict(item) for item in data]
+            if any(message.role not in {"system", "user", "assistant", "tool"}
+                   or not isinstance(message.content, str)
+                   or not isinstance(message.metadata, dict)
+                   for message in messages):
+                raise ValueError("Invalid stored message")
             return messages
-        except Exception as exc:
-            logger.warning(
-                "session=%s path=%s failed to load: %r — returning empty history",
-                session_id,
-                path,
-                exc,
-            )
-            return []
+        except Exception as error:
+            raise SessionPersistenceError("load") from error
 
     async def save(self, session_id: str, messages: list[Message]) -> None:
-        path = self._path(session_id)
-        data = [m.to_dict() for m in messages]
-        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-        logger.debug(
-            "session=%s path=%s saved %d messages",
-            session_id,
-            path,
-            len(messages),
-        )
+        await call_callable(self._save_file, session_id, messages)
+
+    def _save_file(self, session_id: str, messages: list[Message]) -> None:
+        temporary: Path | None = None
+        try:
+            body = json.dumps([message.to_dict() for message in messages], indent=2, ensure_ascii=False)
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self._dir,
+                    prefix=".sophons-session-", suffix=".tmp", delete=False) as stream:
+                temporary = Path(stream.name)
+                stream.write(body)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self._path(session_id))
+        except Exception as error:
+            raise SessionPersistenceError("save") from error
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    logger.warning("Session temporary-file cleanup failed")
 
     async def delete(self, session_id: str) -> None:
-        path = self._path(session_id)
-        if path.exists():
-            path.unlink()
-            logger.debug("session=%s path=%s deleted", session_id, path)
+        await call_callable(self._delete_file, session_id)
+
+    def _delete_file(self, session_id: str) -> None:
+        try:
+            self._check_directory("delete")
+            self._path(session_id).unlink()
+        except FileNotFoundError:
+            self._check_directory("delete")
+        except Exception as error:
+            raise SessionPersistenceError("delete") from error
 
     async def exists(self, session_id: str) -> bool:
-        return self._path(session_id).exists()
+        return await call_callable(self._exists_file, session_id)
+
+    def _exists_file(self, session_id: str) -> bool:
+        try:
+            self._check_directory("exists")
+            self._path(session_id).stat()
+            return True
+        except FileNotFoundError:
+            self._check_directory("exists")
+            return False
+        except Exception as error:
+            raise SessionPersistenceError("exists") from error
+
+    def _check_directory(self, operation: str) -> None:
+        try:
+            if not stat.S_ISDIR(self._dir.stat().st_mode):
+                raise OSError("Session store is not a directory")
+        except OSError as error:
+            raise SessionPersistenceError(operation) from error
 
     def _path(self, session_id: str) -> Path:
-        # Sanitise the session_id so it is safe as a filename
-        safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in session_id)
+        safe = "".join(char if char.isalnum() or char in "-_." else "_" for char in session_id)
         return self._dir / f"{safe}.json"

@@ -146,7 +146,7 @@ def test_failing_tool_marks_span_as_error(exporter: InMemorySpanExporter) -> Non
     @tool
     def explode() -> str:
         """Always fails."""
-        raise RuntimeError("boom")
+        raise RuntimeError("SECRET_TOOL_CONNECTION_DETAIL")
 
     class ExplodingToolModel:
         def __init__(self) -> None:
@@ -172,7 +172,8 @@ def test_failing_tool_marks_span_as_error(exporter: InMemorySpanExporter) -> Non
     spans = _spans_by_name(exporter)
     (tool_span,) = spans["execute_tool explode"]
     assert not tool_span.status.is_ok
-    assert "boom" in tool_span.status.description
+    assert "Tool execution failed" in tool_span.status.description
+    assert "SECRET_TOOL_CONNECTION_DETAIL" not in str(exporter.get_finished_spans())
 
 
 def test_component_span_nests_under_tool_span(

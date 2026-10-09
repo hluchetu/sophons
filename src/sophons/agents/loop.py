@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import time
+import threading
 import uuid
 from typing import Any
 
@@ -37,6 +38,7 @@ from sophons.agents.responses import (
 )
 from sophons.agents.retry import RetryStrategy, no_retry
 from sophons.agents.state import RunLimits, RunState
+from sophons.agents.control import RunControl, RunStopped, call_callable
 from sophons.errors import is_context_overflow
 from sophons.guardrails import GuardrailChain, GuardrailContext
 from sophons.guardrails.approval import ApprovalRequest, Approver
@@ -120,25 +122,49 @@ class AgentLoop:
     # ------------------------------------------------------------------
 
     async def run(
-        self,
-        input: str,
-        *,
-        session_id: str | None = None,
+        self, input: str, *, session_id: str | None = None,
         messages: list[Message] | None = None,
+        cancel_signal: threading.Event | None = None,
+        notify_finished: bool = True,
     ) -> AgentResult:
-        """
-        Run the agent loop for one user input.
-
-        Args:
-            input:      The user's message.
-            session_id: Optional session identifier passed through to hooks.
-            messages:   Prior conversation history to seed the loop with.
-                        If omitted the loop starts with an empty history.
-
-        Returns:
-            An ``AgentResult`` whether the run succeeded or failed.
-        """
+        """Run one invocation under a shared deadline and caller-owned cancellation."""
         state = RunState()
+        control = RunControl(state, self._limits, cancel_signal)
+        tool_uses: list[ToolUse] = []
+        tool_results: list[ToolResult] = []
+        attributes = {_semconv.SESSION_ID: session_id} if session_id is not None else {}
+        with _TRACER.start_as_current_span("invoke_agent", attributes=attributes) as span:
+            try:
+                result = await control.wait(lambda: self._run(
+                    input, session_id=session_id, messages=messages, state=state,
+                    control=control, root_span=span,
+                    tool_uses=tool_uses, tool_results=tool_results,
+                ))
+                if result.success and notify_finished:
+                    self._hooks.invoke(AgentFinished(result=result, session_id=session_id))
+                return result
+            except RunStopped as stopped:
+                result = self._build_result(
+                    stop_reason=stopped.reason, message=str(stopped), state=state,
+                    tool_uses=tool_uses, tool_results=tool_results,
+                    success=False, session_id=session_id,
+                )
+                _record_result(span, result)
+                return result
+            except asyncio.CancelledError:
+                result = self._build_result(
+                    stop_reason=StopReason.CANCELLED, message="Run cancelled", state=state,
+                    tool_uses=tool_uses, tool_results=tool_results,
+                    success=False, session_id=session_id,
+                )
+                _record_result(span, result)
+                raise  # Preserve asyncio task cancellation for the caller.
+
+    async def _run(
+        self, input: str, *, session_id: str | None, messages: list[Message] | None,
+        state: RunState, control: RunControl, root_span: trace.Span,
+        tool_uses: list[ToolUse], tool_results: list[ToolResult],
+    ) -> AgentResult:
         history: list[Message] = list(messages or [])
 
         # Prepend system prompt if provided and not already present
@@ -151,30 +177,278 @@ class AgentLoop:
         self._hooks.invoke(MessageAdded(message=user_message, step=state.step_count))
         self._hooks.invoke(AgentStarted(input=input, session_id=session_id))
 
-        tool_uses: list[ToolUse] = []
-        tool_results: list[ToolResult] = []
+        try:
+            # ── 0. Input guardrails ────────────────────────────────
+            if self._guardrails is not None:
+                decision = await self._guardrails.check(
+                    input,
+                    context=GuardrailContext(
+                        boundary="input", session_id=session_id
+                    ),
+                )
+                if not decision.allowed:
+                    result = self._build_result(
+                        stop_reason=StopReason.GUARDRAIL,
+                        message=decision.message
+                        or "This request was blocked by a guardrail.",
+                        state=state,
+                        tool_uses=tool_uses,
+                        tool_results=tool_results,
+                        success=False,
+                        session_id=session_id,
+                    )
+                    _record_result(root_span, result)
+                    return result
+                if decision.action == "transform":
+                    history[-1] = Message(
+                        role="user",
+                        content=str(decision.transformed),
+                        id=user_message.id,
+                    )
 
-        root_attributes: dict[str, Any] = {}
-        if session_id is not None:
-            root_attributes[_semconv.SESSION_ID] = session_id
+            while True:
+                # ── 1. Check limits ────────────────────────────────────
+                exceeded = state.exceeds(self._limits)
+                if exceeded is not None:
+                    stop_reason = _limit_to_stop_reason(exceeded)
+                    result = self._build_result(
+                        stop_reason=stop_reason,
+                        message="",
+                        state=state,
+                        tool_uses=tool_uses,
+                        tool_results=tool_results,
+                        success=False,
+                        session_id=session_id,
+                    )
+                    _record_result(root_span, result)
+                    return result
 
-        with _TRACER.start_as_current_span(
-            "invoke_agent", attributes=root_attributes
-        ) as root_span:
-            try:
-                # ── 0. Input guardrails ────────────────────────────────
+                # ── 2. Prepare context ─────────────────────────────────
+                prepare_context = PrepareContext(
+                    current_input=input,
+                    token_counter=self._token_counter,
+                    # Models declare their window if they know it; None
+                    # leaves ratio-based strategies to fall back on
+                    # absolute triggers.
+                    context_window=getattr(self._model, "context_window", None),
+                )
+                if self._conversation_manager is not None:
+                    context = await call_callable(self._conversation_manager.prepare,
+                        history, prepare_context)
+                else:
+                    context = list(history)
+
+                # ── 3. Call model ──────────────────────────────────────
+                self._hooks.invoke(
+                    BeforeModelCall(messages=context, step=state.step_count)
+                )
+
+                model_call_start = time.monotonic()
+                with _TRACER.start_as_current_span(
+                    "chat", attributes={_semconv.STEP: state.step_count}
+                ) as model_span:
+                    try:
+                        response: Message = await self._retry_strategy.execute(
+                            lambda: self._invoke_model_attempt(context, control),
+                            before_sleep=control.before_retry_sleep,
+                        )
+                    except Exception as model_error:
+                        # A rejected-as-too-large request is recoverable in
+                        # a way most provider errors are not: ask the
+                        # manager for less and try once more. Estimating
+                        # size beforehand can be wrong; this path does not
+                        # depend on estimating correctly.
+                        if (
+                            self._conversation_manager is None
+                            or not is_context_overflow(model_error)
+                        ):
+                            raise
+                        logger.info(
+                            "step=%s context overflow, reducing and retrying: %r",
+                            state.step_count,
+                            model_error,
+                        )
+                        model_span.add_event(
+                            "context_overflow",
+                            {"sophons.context.messages_before": len(context)},
+                        )
+                        context = await call_callable(self._conversation_manager.reduce_context,
+                            history, prepare_context, model_error)
+                        response = await self._retry_strategy.execute(
+                            lambda: self._invoke_model_attempt(context, control),
+                            before_sleep=control.before_retry_sleep,
+                        )
+                    _record_usage(model_span, response)
+                model_call_ms = (time.monotonic() - model_call_start) * 1000
+
+                state.input_tokens += _extract_tokens(response, "input_tokens")
+                state.output_tokens += _extract_tokens(response, "output_tokens")
+                state.cache_read_tokens += _extract_tokens(response, "cache_read_tokens")
+                state.cache_write_tokens += _extract_tokens(response, "cache_write_tokens")
+
+                self._hooks.invoke(
+                    AfterModelCall(
+                        message=response,
+                        step=state.step_count,
+                        duration_ms=model_call_ms,
+                    )
+                )
+
+                history.append(response)
+                self._hooks.invoke(
+                    MessageAdded(message=response, step=state.step_count)
+                )
+
+                # ── 4. Handle tool calls ───────────────────────────────
+                pending_tool_uses = _extract_tool_uses(response)
+
+                if pending_tool_uses:
+                    # ── 4a. Structured output ──────────────────────────
+                    # A call to the output tool is not a request to *do*
+                    # anything — it is the model handing back the answer
+                    # in the required shape, so it ends the run.
+                    if self._output_tool is not None:
+                        final_use = next(
+                            (
+                                use
+                                for use in pending_tool_uses
+                                if use.name == self._output_tool.name
+                            ),
+                            None,
+                        )
+                        if final_use is not None:
+                            if not state.reserve_tool_call(self._limits):
+                                return self._finish_tool_budget(
+                                    pending=pending_tool_uses, history=history,
+                                    state=state, tool_uses=tool_uses,
+                                    tool_results=tool_results, session_id=session_id,
+                                    span=root_span,
+                                )
+                            tool_uses.append(final_use)
+
+                            try:
+                                output = self._output_tool.validate(
+                                    final_use.input
+                                )
+                            except ValidationError as validation_error:
+                                # Hand the model its own validation errors
+                                # so it can correct them, rather than
+                                # failing the run. Bounded by max_steps.
+                                retry = ToolResult(
+                                    tool_use_id=final_use.tool_use_id,
+                                    status="error",
+                                    content=format_validation_error(
+                                        validation_error
+                                    ),
+                                )
+                                tool_results.append(retry)
+                                history.append(_tool_result_to_message(retry))
+                                state.step_count += 1
+                                continue
+
+                            # Structured output is still final output: schema
+                            # validity never bypasses the output-policy boundary.
+                            state.step_count += 1
+                            if self._guardrails is not None:
+                                decision = await self._guardrails.check(
+                                    output.model_dump_json(),
+                                    context=GuardrailContext(
+                                        boundary="output", session_id=session_id
+                                    ),
+                                )
+                                rejected_message = None
+                                if not decision.allowed:
+                                    rejected_message = (
+                                        decision.message
+                                        or "The response was blocked by a guardrail."
+                                    )
+                                elif decision.action == "transform":
+                                    try:
+                                        output = self._output_tool.validate_transformed(
+                                            decision.transformed
+                                        )
+                                    except (ValidationError, ValueError, TypeError):
+                                        # Never accept an invalid transformed record
+                                        # or send rejected values back to the model.
+                                        rejected_message = (
+                                            "The guardrail-transformed response did not "
+                                            "match the required output schema."
+                                        )
+                                if rejected_message is not None:
+                                    result = self._build_result(
+                                        stop_reason=StopReason.GUARDRAIL,
+                                        message=rejected_message,
+                                        state=state,
+                                        tool_uses=tool_uses,
+                                        tool_results=tool_results,
+                                        success=False,
+                                        session_id=session_id,
+                                    )
+                                    _record_result(root_span, result)
+                                    return result
+
+                            accepted = ToolResult(
+                                tool_use_id=final_use.tool_use_id,
+                                status="success",
+                                content=output.model_dump_json(),
+                            )
+                            tool_results.append(accepted)
+
+                            result = self._build_result(
+                                stop_reason=StopReason.END_TURN,
+                                message=output.model_dump_json(),
+                                state=state,
+                                tool_uses=tool_uses,
+                                tool_results=tool_results,
+                                success=True,
+                                session_id=session_id,
+                                output=output,
+                            )
+                            _record_result(root_span, result)
+                            return result
+
+                    for position, tool_use in enumerate(pending_tool_uses):
+                        if not state.reserve_tool_call(self._limits):
+                            return self._finish_tool_budget(
+                                pending=pending_tool_uses[position:], history=history,
+                                state=state, tool_uses=tool_uses,
+                                tool_results=tool_results, session_id=session_id,
+                                span=root_span,
+                            )
+                        tool_result = await self._execute_tool(
+                            tool_use=tool_use,
+                            step=state.step_count,
+                            state=state,
+                        )
+                        tool_uses.append(tool_use)
+                        tool_results.append(tool_result)
+
+                        result_message = _tool_result_to_message(tool_result)
+                        history.append(result_message)
+                        self._hooks.invoke(
+                            MessageAdded(
+                                message=result_message, step=state.step_count
+                            )
+                        )
+
+                    state.step_count += 1
+                    continue
+
+                # ── 5. Final answer ────────────────────────────────────
+                state.step_count += 1
+                final_message = response.content
                 if self._guardrails is not None:
                     decision = await self._guardrails.check(
-                        input,
+                        final_message,
                         context=GuardrailContext(
-                            boundary="input", session_id=session_id
+                            boundary="output", session_id=session_id
                         ),
                     )
                     if not decision.allowed:
                         result = self._build_result(
                             stop_reason=StopReason.GUARDRAIL,
                             message=decision.message
-                            or "This request was blocked by a guardrail.",
+                            or "The response was blocked by a guardrail.",
                             state=state,
                             tool_uses=tool_uses,
                             tool_results=tool_results,
@@ -184,265 +458,83 @@ class AgentLoop:
                         _record_result(root_span, result)
                         return result
                     if decision.action == "transform":
-                        history[-1] = Message(
-                            role="user",
-                            content=str(decision.transformed),
-                            id=user_message.id,
-                        )
-
-                while True:
-                    # ── 1. Check limits ────────────────────────────────────
-                    exceeded = state.exceeds(self._limits)
-                    if exceeded is not None:
-                        stop_reason = _limit_to_stop_reason(exceeded)
-                        result = self._build_result(
-                            stop_reason=stop_reason,
-                            message="",
-                            state=state,
-                            tool_uses=tool_uses,
-                            tool_results=tool_results,
-                            success=False,
-                            session_id=session_id,
-                        )
-                        _record_result(root_span, result)
-                        return result
-
-                    # ── 2. Prepare context ─────────────────────────────────
-                    prepare_context = PrepareContext(
-                        current_input=input,
-                        token_counter=self._token_counter,
-                        # Models declare their window if they know it; None
-                        # leaves ratio-based strategies to fall back on
-                        # absolute triggers.
-                        context_window=getattr(self._model, "context_window", None),
-                    )
-                    if self._conversation_manager is not None:
-                        context = self._conversation_manager.prepare(
-                            history, prepare_context
-                        )
-                    else:
-                        context = list(history)
-
-                    # ── 3. Call model ──────────────────────────────────────
-                    self._hooks.invoke(
-                        BeforeModelCall(messages=context, step=state.step_count)
-                    )
-
-                    model_call_start = time.monotonic()
-                    with _TRACER.start_as_current_span(
-                        "chat", attributes={_semconv.STEP: state.step_count}
-                    ) as model_span:
-                        try:
-                            response: Message = await self._retry_strategy.execute(
-                                lambda: self._invoke_model(context)
-                            )
-                        except Exception as model_error:
-                            # A rejected-as-too-large request is recoverable in
-                            # a way most provider errors are not: ask the
-                            # manager for less and try once more. Estimating
-                            # size beforehand can be wrong; this path does not
-                            # depend on estimating correctly.
-                            if (
-                                self._conversation_manager is None
-                                or not is_context_overflow(model_error)
-                            ):
-                                raise
-                            logger.info(
-                                "step=%s context overflow, reducing and retrying: %r",
-                                state.step_count,
-                                model_error,
-                            )
-                            model_span.add_event(
-                                "context_overflow",
-                                {"sophons.context.messages_before": len(context)},
-                            )
-                            context = self._conversation_manager.reduce_context(
-                                history, prepare_context, model_error
-                            )
-                            response = await self._retry_strategy.execute(
-                                lambda: self._invoke_model(context)
-                            )
-                        _record_usage(model_span, response)
-                    model_call_ms = (time.monotonic() - model_call_start) * 1000
-
-                    state.model_call_count += 1
-                    state.input_tokens += _extract_tokens(response, "input_tokens")
-                    state.output_tokens += _extract_tokens(response, "output_tokens")
-                    state.cache_read_tokens += _extract_tokens(response, "cache_read_tokens")
-                    state.cache_write_tokens += _extract_tokens(response, "cache_write_tokens")
-
-                    self._hooks.invoke(
-                        AfterModelCall(
-                            message=response,
-                            step=state.step_count,
-                            duration_ms=model_call_ms,
-                        )
-                    )
-
-                    history.append(response)
-                    self._hooks.invoke(
-                        MessageAdded(message=response, step=state.step_count)
-                    )
-
-                    # ── 4. Handle tool calls ───────────────────────────────
-                    pending_tool_uses = _extract_tool_uses(response)
-
-                    if pending_tool_uses:
-                        # ── 4a. Structured output ──────────────────────────
-                        # A call to the output tool is not a request to *do*
-                        # anything — it is the model handing back the answer
-                        # in the required shape, so it ends the run.
-                        if self._output_tool is not None:
-                            final_use = next(
-                                (
-                                    use
-                                    for use in pending_tool_uses
-                                    if use.name == self._output_tool.name
-                                ),
-                                None,
-                            )
-                            if final_use is not None:
-                                tool_uses.append(final_use)
-                                state.tool_call_count += 1
-
-                                try:
-                                    output = self._output_tool.validate(
-                                        final_use.input
-                                    )
-                                except ValidationError as validation_error:
-                                    # Hand the model its own validation errors
-                                    # so it can correct them, rather than
-                                    # failing the run. Bounded by max_steps.
-                                    retry = ToolResult(
-                                        tool_use_id=final_use.tool_use_id,
-                                        status="error",
-                                        content=format_validation_error(
-                                            validation_error
-                                        ),
-                                    )
-                                    tool_results.append(retry)
-                                    history.append(_tool_result_to_message(retry))
-                                    state.step_count += 1
-                                    continue
-
-                                accepted = ToolResult(
-                                    tool_use_id=final_use.tool_use_id,
-                                    status="success",
-                                    content=output.model_dump_json(),
-                                )
-                                tool_results.append(accepted)
-                                state.step_count += 1
-
-                                result = self._build_result(
-                                    stop_reason=StopReason.END_TURN,
-                                    message=output.model_dump_json(),
-                                    state=state,
-                                    tool_uses=tool_uses,
-                                    tool_results=tool_results,
-                                    success=True,
-                                    session_id=session_id,
-                                    output=output,
-                                )
-                                _record_result(root_span, result)
-                                self._hooks.invoke(
-                                    AgentFinished(result=result, session_id=session_id)
-                                )
-                                return result
-
-                        for tool_use in pending_tool_uses:
-                            tool_result = await self._execute_tool(
-                                tool_use=tool_use,
-                                step=state.step_count,
-                                state=state,
-                            )
-                            tool_uses.append(tool_use)
-                            tool_results.append(tool_result)
-                            state.tool_call_count += 1
-
-                            result_message = _tool_result_to_message(tool_result)
-                            history.append(result_message)
-                            self._hooks.invoke(
-                                MessageAdded(
-                                    message=result_message, step=state.step_count
-                                )
-                            )
-
-                        state.step_count += 1
-                        continue
-
-                    # ── 5. Final answer ────────────────────────────────────
-                    state.step_count += 1
-                    final_message = response.content
-                    if self._guardrails is not None:
-                        decision = await self._guardrails.check(
-                            final_message,
-                            context=GuardrailContext(
-                                boundary="output", session_id=session_id
-                            ),
-                        )
-                        if not decision.allowed:
-                            result = self._build_result(
-                                stop_reason=StopReason.GUARDRAIL,
-                                message=decision.message
-                                or "The response was blocked by a guardrail.",
-                                state=state,
-                                tool_uses=tool_uses,
-                                tool_results=tool_results,
-                                success=False,
-                                session_id=session_id,
-                            )
-                            _record_result(root_span, result)
-                            return result
-                        if decision.action == "transform":
-                            final_message = str(decision.transformed)
-                    result = self._build_result(
-                        stop_reason=StopReason.END_TURN,
-                        message=final_message,
-                        state=state,
-                        tool_uses=tool_uses,
-                        tool_results=tool_results,
-                        success=True,
-                        session_id=session_id,
-                    )
-                    _record_result(root_span, result)
-                    self._hooks.invoke(
-                        AgentFinished(result=result, session_id=session_id)
-                    )
-                    return result
-
-            except Exception as error:
-                state.step_count += 1
-                root_span.record_exception(error)
-                root_span.set_status(StatusCode.ERROR, str(error))
-                self._hooks.invoke(
-                    AgentFailed(
-                        error=error, step=state.step_count, session_id=session_id
-                    )
-                )
+                        final_message = str(decision.transformed)
                 result = self._build_result(
-                    stop_reason=StopReason.ERROR,
-                    message=str(error),
+                    stop_reason=StopReason.END_TURN,
+                    message=final_message,
                     state=state,
                     tool_uses=tool_uses,
                     tool_results=tool_results,
-                    success=False,
-                    error=error,
+                    success=True,
                     session_id=session_id,
                 )
                 _record_result(root_span, result)
                 return result
 
+        except RunStopped:
+            raise
+        except Exception as error:
+            state.step_count += 1
+            root_span.record_exception(error)
+            root_span.set_status(StatusCode.ERROR, str(error))
+            self._hooks.invoke(
+                AgentFailed(
+                    error=error, step=state.step_count, session_id=session_id
+                )
+            )
+            result = self._build_result(
+                stop_reason=StopReason.ERROR,
+                message=str(error),
+                state=state,
+                tool_uses=tool_uses,
+                tool_results=tool_results,
+                success=False,
+                error=error,
+                session_id=session_id,
+            )
+            _record_result(root_span, result)
+            return result
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _finish_tool_budget(
+        self, *, pending: list[ToolUse], history: list[Message], state: RunState,
+        tool_uses: list[ToolUse], tool_results: list[ToolResult],
+        session_id: str | None, span: trace.Span,
+    ) -> AgentResult:
+        """Record skipped requests without invoking their functions or tool hooks."""
+        for use in pending:
+            skipped = ToolResult(
+                tool_use_id=use.tool_use_id, status="error",
+                content="Tool call skipped: the run's tool-call budget is exhausted.",
+            )
+            tool_uses.append(use)
+            tool_results.append(skipped)
+            message = _tool_result_to_message(skipped)
+            history.append(message)
+            self._hooks.invoke(MessageAdded(message=message, step=state.step_count))
+        state.step_count += 1
+        result = self._build_result(
+            stop_reason=StopReason.MAX_TOOL_CALLS,
+            message="The run stopped because its tool-call budget was exhausted.",
+            state=state, tool_uses=tool_uses, tool_results=tool_results,
+            success=False, session_id=session_id,
+        )
+        _record_result(span, result)
+        return result
+
+    async def _invoke_model_attempt(self, messages: list[Message], control: RunControl) -> Message:
+        control.reserve_model_attempt()
+        response = await self._invoke_model(messages)
+        control.check()  # A late result cannot be accepted or used for more work.
+        return response
+
     async def _invoke_model(self, messages: list[Message]) -> Message:
         """Call the model, supporting both sync and async ChatModel."""
         if hasattr(self._model, "invoke"):
-            result = self._model.invoke(messages, tools=list(self._tools.values()))
-            if asyncio.iscoroutine(result):
-                return await result
-            return result
+            return await call_callable(self._model.invoke, messages, tools=list(self._tools.values()))
         raise TypeError(
             f"Model {type(self._model).__name__!r} does not implement invoke()."
         )
@@ -538,22 +630,20 @@ class AgentLoop:
                 )
             else:
                 try:
-                    raw = tool.call(tool_args)
-                    if asyncio.iscoroutine(raw):
-                        raw = await raw
+                    raw = await call_callable(tool.call, tool_args)
                     tool_result = ToolResult(
                         tool_use_id=tool_use.tool_use_id,
                         status="success",
                         content=json.dumps(raw) if not isinstance(raw, str) else raw,
                     )
-                except Exception as exc:
-                    logger.debug(
-                        "tool=%s error=%r | tool execution failed", tool_use.name, exc
-                    )
+                except Exception:
+                    # Exception messages may contain credentials, SQL or private data.
+                    # Never send them to the model, hooks, logs or span status.
+                    logger.debug("tool=%s | tool execution failed", tool_use.name)
                     tool_result = ToolResult(
                         tool_use_id=tool_use.tool_use_id,
                         status="error",
-                        content=str(exc),
+                        content="Tool execution failed. The operation could not be completed.",
                     )
 
             if tool_result.status == "error":
@@ -649,8 +739,8 @@ def _record_usage(span: trace.Span, message: Message) -> None:
 def _limit_to_stop_reason(limit: str) -> StopReason:
     mapping: dict[str, StopReason] = {
         "max_steps": StopReason.MAX_STEPS,
-        "max_model_calls": StopReason.MAX_STEPS,
-        "max_tool_calls": StopReason.MAX_STEPS,
+        "max_model_calls": StopReason.MAX_MODEL_CALLS,
+        "max_tool_calls": StopReason.MAX_TOOL_CALLS,
         "max_tokens": StopReason.MAX_TOKENS,
         "max_runtime": StopReason.MAX_RUNTIME,
     }

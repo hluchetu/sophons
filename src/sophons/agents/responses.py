@@ -10,10 +10,13 @@ from typing import Any, Literal
 class StopReason(str, Enum):
     END_TURN = "end_turn"  # model decided it is done
     MAX_STEPS = "max_steps"  # the loop hit the step limit
+    MAX_MODEL_CALLS = "max_model_calls"  # main-model attempt allowance exhausted
+    MAX_TOOL_CALLS = "max_tool_calls"  # no further tool dispatches allowed
     MAX_TOKENS = "max_tokens"  # token budget exhausted
     MAX_RUNTIME = "max_runtime"  # time limit hit
     CANCELLED = "cancelled"  # cancelled from outside
     GUARDRAIL = "guardrail"  # a guardrail blocked the run
+    SESSION_ERROR = "session_error"  # history could not be loaded/persisted
     ERROR = "error"  # unrecoverable failure
 
 
@@ -78,7 +81,7 @@ class AgentResult:
     tool_uses: list[ToolUse]  # every tool the model requested
     tool_results: list[ToolResult]  # every tool result received
     success: bool  # did it reach end_turn cleanly?
-    error: str | None = None  # error message if stop_reason is ERROR
+    error: str | None = None  # safe error message for ERROR or SESSION_ERROR
     output: Any = None  # validated output object when output_type is set
 
     def __str__(self) -> str:

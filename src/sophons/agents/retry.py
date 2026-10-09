@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import random
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, TypeVar, cast
+
+from sophons.agents.control import RunStopped
 
 logger = logging.getLogger(__name__)
 
@@ -216,9 +219,15 @@ class RetryStrategy:
     policy: RetryPolicy = field(default_factory=never)
     backoff: BackoffSettings = field(default_factory=BackoffSettings)
 
+    def __post_init__(self) -> None:
+        if type(self.max_attempts) is not int or self.max_attempts < 1:
+            raise ValueError("max_attempts must be a positive integer including the first attempt")
+
     async def execute(
         self,
         fn: Callable[[], Awaitable[T]],
+        *,
+        before_sleep: Callable[[float], None] | None = None,
         **kwargs: Any,
     ) -> T:
         """
@@ -242,6 +251,8 @@ class RetryStrategy:
         while True:
             try:
                 return await fn()
+            except RunStopped:
+                raise  # Budget/deadline exhaustion is terminal even under broad policies.
             except Exception as error:
                 context = RetryContext(
                     error=error,
@@ -281,6 +292,10 @@ class RetryStrategy:
                     error,
                 )
 
+                if not math.isfinite(delay) or delay < 0:
+                    raise ValueError("Retry delay must be finite and nonnegative")
+                if before_sleep is not None:
+                    before_sleep(delay)
                 await asyncio.sleep(delay)
                 attempt += 1
 

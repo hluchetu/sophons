@@ -8,6 +8,7 @@ dependencies = ["opentelemetry-api>=1.26", "lazy-loader>=0.4", "pydantic>=2.0"]
 
 [project.optional-dependencies]
 pdf = ["pypdf>=4"]
+pdf-structure = ["pymupdf4llm>=0.3"]
 openai = ["openai>=1.0"]
 deepseek = ["openai>=1.0"]
 anthropic = ["anthropic>=0.40"]

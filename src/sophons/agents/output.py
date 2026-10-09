@@ -83,6 +83,18 @@ class OutputTool:
         """Turn the model's arguments into the output object, or raise."""
         return self._output_type.model_validate(args)
 
+    def validate_transformed(self, value: Any) -> BaseModel:
+        """Revalidate policy output; accept JSON, a mapping or a Pydantic record.
+
+        Policies receive JSON at the output boundary, matching ordinary text
+        guardrails. A transformation must still satisfy the declared schema.
+        """
+        if isinstance(value, (str, bytes, bytearray)):
+            return self._output_type.model_validate_json(value)
+        if isinstance(value, BaseModel):
+            value = value.model_dump()
+        return self._output_type.model_validate(value)
+
     def call(self, args: dict[str, Any]) -> dict[str, Any]:
         # Unreachable in normal operation: AgentLoop intercepts this tool
         # before execution. Present to satisfy the Tool protocol.

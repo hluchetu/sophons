@@ -17,6 +17,7 @@ from sophons.agents.conversation import (
     PrepareContext,
     SlidingWindowManager,
     SummarizingManager,
+    estimate_projected_tokens,
 )
 from dataclasses import replace
 
@@ -124,6 +125,77 @@ def test_approximate_counter_is_the_default_for_token_windows():
     ).prepare(history)
 
     assert 0 < len(kept) < len(history)
+
+
+# ---------------------------------------------------------------------------
+# Projected token estimation
+# ---------------------------------------------------------------------------
+
+
+def test_projected_tokens_estimate_every_message_without_usage():
+    """A cold start has no provider baseline, so every message is estimated."""
+    history = [
+        msg("user", "1234", "m1"),
+        msg("assistant", "5678", "m2"),
+        msg("user", "abcdefgh", "m3"),
+    ]
+
+    assert estimate_projected_tokens(history, CharTokenCounter()) == 4
+
+
+def test_projected_tokens_use_latest_assistant_usage_as_baseline():
+    """Only messages after the measured response need an estimated cost."""
+    history = [
+        msg("user", "old user message", "m1"),
+        msg(
+            "assistant",
+            "old assistant message",
+            "m2",
+            usage={"input_tokens": 12, "output_tokens": 4},
+        ),
+        msg("tool", "1234", "m3"),
+        msg("user", "abcdefgh", "m4"),
+    ]
+
+    assert estimate_projected_tokens(history, CharTokenCounter()) == 19
+
+
+def test_projected_tokens_prefer_the_most_recent_valid_usage():
+    """A newer measured model call supersedes an older measurement."""
+    history = [
+        msg(
+            "assistant",
+            "first response",
+            "m1",
+            usage={"input_tokens": 10, "output_tokens": 2},
+        ),
+        msg("user", "intermediate message", "m2"),
+        msg(
+            "assistant",
+            "second response",
+            "m3",
+            usage={"input_tokens": 20, "output_tokens": 3},
+        ),
+        msg("user", "12345678", "m4"),
+    ]
+
+    assert estimate_projected_tokens(history, CharTokenCounter()) == 25
+
+
+def test_projected_tokens_ignore_incomplete_usage_metadata():
+    """Malformed usage is not a trustworthy baseline; fall back to estimates."""
+    history = [
+        msg("user", "1234", "m1"),
+        msg(
+            "assistant",
+            "5678",
+            "m2",
+            usage={"input_tokens": 10},
+        ),
+        msg("user", "abcdefgh", "m3"),
+    ]
+
+    assert estimate_projected_tokens(history, CharTokenCounter()) == 4
 
 
 # ---------------------------------------------------------------------------

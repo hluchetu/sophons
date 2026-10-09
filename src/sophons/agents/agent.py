@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import uuid
 from pydantic import BaseModel
 
@@ -9,7 +10,9 @@ from sophons.agents.conversation import ConversationManager, TokenCounter
 from sophons.agents.hooks import HookCallback, HookEventT, HookRegistry
 from sophons.agents.loop import AgentLoop
 from sophons.agents.memory import MemoryConfig
-from sophons.agents.responses import AgentResult
+from sophons.agents.responses import AgentResult, AgentMetrics, StopReason
+from sophons.errors import SessionPersistenceError
+from sophons.agents.hooks import AgentFailed, AgentFinished
 from sophons.agents.retry import RetryStrategy, exponential_backoff
 from sophons.agents.session import InMemorySessionManager, SessionManager
 from sophons.agents.state import RunLimits
@@ -114,6 +117,7 @@ class Agent:
         input: str,
         *,
         session_id: str | None = None,
+        cancel_signal: threading.Event | None = None,
     ) -> AgentResult:
         """
         Run the agent for one user message.
@@ -130,7 +134,10 @@ class Agent:
             ``AgentResult`` with the final message, stop reason, metrics,
             and any tool activity from this run.
         """
-        prior_messages = await self._load_session(session_id)
+        try:
+            prior_messages = await self._load_session(session_id)
+        except SessionPersistenceError as error:
+            return self._session_failure(error, session_id=session_id)
         namespace = self._memory_namespace(input, session_id)
         memory_context = await self._memory_context(input, namespace)
         loop_input = self._with_memory_context(input, memory_context)
@@ -139,10 +146,17 @@ class Agent:
             loop_input,
             session_id=session_id,
             messages=prior_messages,
+            cancel_signal=cancel_signal,
+            notify_finished=False,
         )
 
-        await self._save_session(session_id, prior_messages, input, result)
+        try:
+            await self._save_session(session_id, prior_messages, input, result)
+        except SessionPersistenceError as error:
+            return self._session_failure(error, session_id=session_id, candidate=result)
         await self._add_memory(input, result, namespace)
+        if result.success:
+            self._hooks.invoke(AgentFinished(result=result, session_id=session_id))
         return result
 
     def run_sync(
@@ -150,6 +164,7 @@ class Agent:
         input: str,
         *,
         session_id: str | None = None,
+        cancel_signal: threading.Event | None = None,
     ) -> AgentResult:
         """
         Synchronous wrapper around ``run()``.
@@ -172,7 +187,7 @@ class Agent:
                 "Use 'await agent.run()' instead."
             )
 
-        return asyncio.run(self.run(input, session_id=session_id))
+        return asyncio.run(self.run(input, session_id=session_id, cancel_signal=cancel_signal))
 
     def new_session_id(self) -> str:
         """Generate a fresh unique session ID."""
@@ -183,9 +198,10 @@ class Agent:
         input: str,
         *,
         session_id: str | None = None,
+        cancel_signal: threading.Event | None = None,
     ) -> AgentResult:
         """Shorthand for run_sync — lets you call the agent like a function."""
-        return self.run_sync(input, session_id=session_id)
+        return self.run_sync(input, session_id=session_id, cancel_signal=cancel_signal)
 
     def add_hook(self, callback: HookCallback[HookEventT]) -> None:
         """Register a lifecycle hook by inferring its event annotation."""
@@ -295,17 +311,24 @@ class Agent:
             return []
         try:
             messages = await self._session_manager.load(session_id)
+            if not isinstance(messages, list) or any(
+                not isinstance(message, Message)
+                or message.role not in {"system", "user", "assistant", "tool"}
+                or not isinstance(message.content, str)
+                or not isinstance(message.metadata, dict)
+                for message in messages
+            ):
+                raise SessionPersistenceError("load")
             logger.debug(
                 "session=%s loaded %d prior messages", session_id, len(messages)
             )
             return messages
         except Exception as exc:
-            logger.warning(
-                "session=%s failed to load history: %r — starting fresh",
-                session_id,
-                exc,
-            )
-            return []
+            logger.warning("Session history load failed; returning a persistence error")
+            if isinstance(exc, SessionPersistenceError):
+                raise
+            raise SessionPersistenceError("load") from exc
+
 
     async def _save_session(
         self,
@@ -331,9 +354,22 @@ class Agent:
                 "session=%s saved %d messages", session_id, len(updated)
             )
         except Exception as exc:
-            logger.warning(
-                "session=%s failed to save history: %r", session_id, exc
-            )
+            logger.warning("Session history save failed; returning a persistence error")
+            if isinstance(exc, SessionPersistenceError):
+                raise
+            raise SessionPersistenceError("save") from exc
+
+    def _session_failure(self, error: SessionPersistenceError, *,
+                         session_id: str | None, candidate: AgentResult | None = None) -> AgentResult:
+        result = AgentResult(
+            stop_reason=StopReason.SESSION_ERROR, message=str(error),
+            metrics=candidate.metrics if candidate is not None else AgentMetrics(),
+            tool_uses=candidate.tool_uses if candidate is not None else [],
+            tool_results=candidate.tool_results if candidate is not None else [],
+            success=False, error=str(error), output=None,
+        )
+        self._hooks.invoke(AgentFailed(error=error, step=result.metrics.steps, session_id=session_id))
+        return result
 
 
 def _ensure_message_ids(messages: list) -> list:

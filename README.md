@@ -270,6 +270,21 @@ Together:
 source -> Loader -> Documents -> Splitter -> Chunks -> Retriever
 ```
 
+For structure-aware PDFs, install `sophons[pdf-structure]` and use:
+
+```python
+from sophons.loaders import PDFStructureLoader
+from sophons.splitters import StructureAwareSplitter
+
+document = PDFStructureLoader("contract.pdf").load()[0]
+chunks = StructureAwareSplitter(max_chunk_size=1000).split(document)
+```
+
+The loader converts PDF layout to Markdown with PyMuPDF4LLM. The splitter
+preserves detected sections and blocks, with source page metadata. See
+[the walkthrough](docs/structure_chunking.md) for inspecting intermediate
+structure, OCR options, and limitations.
+
 ## Tool Pattern
 
 Tools follow a simple agent-facing contract:

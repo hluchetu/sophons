@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import Any
 
 from sophons.errors import (
@@ -28,7 +29,14 @@ class DeepSeekModel:
         base_url: str = "https://api.deepseek.com/v1",
         thinking: bool = False,
         context_window: int | None = None,
+        *,
+        timeout_seconds: float = 60.0,
+        sdk_max_retries: int = 0,
     ) -> None:
+        if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)) or not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be finite and positive")
+        if type(sdk_max_retries) is not int or sdk_max_retries < 0:
+            raise ValueError("sdk_max_retries must be a nonnegative integer")
         try:
             from openai import OpenAI
         except ImportError as exc:
@@ -44,7 +52,10 @@ class DeepSeekModel:
         # is worse than an absent one — strategies fall back to absolute
         # thresholds when this is None.
         self.context_window = context_window
-        self._client = OpenAI(api_key=api_key, base_url=base_url)
+        # Let the agent RetryStrategy own retries by default. Hidden provider
+        # retries otherwise multiply requests behind one model.invoke attempt.
+        self._client = OpenAI(api_key=api_key, base_url=base_url,
+                              timeout=timeout_seconds, max_retries=sdk_max_retries)
         self._thinking = thinking
         self._adapter = OpenAICompatAdapter()
 

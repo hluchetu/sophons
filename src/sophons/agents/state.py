@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import math
 from dataclasses import dataclass, field
 
 from sophons.agents.responses import ToolStats
@@ -19,10 +20,21 @@ class RunLimits:
     """
 
     max_steps: int = 10
+    # Counts every admitted main-model attempt, including failures and retries.
     max_model_calls: int = 20
+    # Counts admitted dispatch attempts, including structured-response calls.
+    # Denied/failed admitted calls consume a slot; skipped calls do not.
     max_tool_calls: int = 20
     max_tokens: int | None = None
     max_runtime_seconds: float = 300.0
+
+    def __post_init__(self) -> None:
+        if type(self.max_model_calls) is not int or self.max_model_calls < 0:
+            raise ValueError("max_model_calls must be a nonnegative integer")
+        if isinstance(self.max_runtime_seconds, bool) or not isinstance(self.max_runtime_seconds, (int, float)) or not math.isfinite(self.max_runtime_seconds) or self.max_runtime_seconds < 0:
+            raise ValueError("max_runtime_seconds must be finite and nonnegative")
+        if type(self.max_tool_calls) is not int or self.max_tool_calls < 0:
+            raise ValueError("max_tool_calls must be a nonnegative integer")
 
 
 # ── RunState ───────────────────────────────────────────────────────────────────
@@ -50,6 +62,20 @@ class RunState:
     cache_write_tokens: int = 0
     per_tool: dict[str, ToolStats] = field(default_factory=dict)
     started_at: float = field(default_factory=time.monotonic)
+
+    def reserve_model_call(self, limits: RunLimits) -> bool:
+        """Reserve before invoking the model, including each retry attempt."""
+        if self.model_call_count >= limits.max_model_calls:
+            return False
+        self.model_call_count += 1
+        return True
+
+    def reserve_tool_call(self, limits: RunLimits) -> bool:
+        """Consume one slot before dispatch; never exceed the configured count."""
+        if self.tool_call_count >= limits.max_tool_calls:
+            return False
+        self.tool_call_count += 1
+        return True
 
     def record_tool_call(self, tool_name: str, duration_ms: float, *, error: bool) -> None:
         """Update per-tool stats after a tool finishes executing."""

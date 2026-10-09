@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from sophons.errors import SessionPersistenceError
+
 from sophons.agents.agent import Agent
 from sophons.agents.conversation import (
     ApproximateTokenCounter,
@@ -109,6 +111,7 @@ __all__ = [
     "all_of",
     # Session
     "SessionManager",
+    "SessionPersistenceError",
     "InMemorySessionManager",
     "FileSessionManager",
 ]

@@ -70,6 +70,37 @@ class ApproximateTokenCounter:
         estimate = characters / self._chars_per_token
         return self._per_message_overhead + math.ceil(estimate)
 
+def estimate_projected_tokens(
+    messages: list[Message],
+    token_counter: TokenCounter,
+) -> int:
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+
+        if message.role != "assistant":
+            continue
+
+        usage = message.metadata.get("usage")
+        if not isinstance(usage, dict):
+            continue
+
+        input_tokens = usage.get("input_tokens")
+        output_tokens = usage.get("output_tokens")
+        if not isinstance(input_tokens, int):
+            continue
+        if not isinstance(output_tokens, int):
+            continue
+
+        baseline = input_tokens + output_tokens
+        new_messages = messages[index + 1 :]
+        delta = sum(
+            token_counter.count_message(new_message)
+            for new_message in new_messages
+        )
+        return baseline + delta
+
+    return sum(token_counter.count_message(message) for message in messages)
+
 
 class ConversationManager(Protocol):
     """

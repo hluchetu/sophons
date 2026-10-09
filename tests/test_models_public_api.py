@@ -54,11 +54,11 @@ def test_bedrock_model_matches_chat_protocol_without_construction() -> None:
 def test_deepseek_constructs_openai_compatible_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    received: dict[str, str] = {}
+    received: dict[str, object] = {}
 
     class FakeOpenAI:
-        def __init__(self, *, api_key: str, base_url: str) -> None:
-            received.update(api_key=api_key, base_url=base_url)
+        def __init__(self, *, api_key: str, base_url: str, timeout: float, max_retries: int) -> None:
+            received.update(api_key=api_key, base_url=base_url, timeout=timeout, max_retries=max_retries)
 
     module = types.ModuleType("openai")
     module.OpenAI = FakeOpenAI  # type: ignore[attr-defined]
@@ -75,6 +75,8 @@ def test_deepseek_constructs_openai_compatible_client(
     assert received == {
         "api_key": "test-key",
         "base_url": "https://api.deepseek.com/v1",
+        "timeout": 60.0,
+        "max_retries": 0,
     }
 
 
