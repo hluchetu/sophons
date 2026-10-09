@@ -20,3 +20,6 @@ docs/SOPHONS_PUBLIC_READINESS.md
 docs/splitters_architecture.md
 docs/storage_architecture.md
 docs/tools_architecture.md
+
+# Local session files
+*.ses
