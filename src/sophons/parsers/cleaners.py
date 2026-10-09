@@ -13,6 +13,11 @@ _PAGE_NUMBER = re.compile(r"^\W*(?:page\s+)?\d{1,4}(?:\s*(?:of|/)\s*\d{1,4})?\W*
 _CLAUSE = re.compile(r"^[ \t]*(\d{1,3}(?:\.\d{1,3})+\.?|\d{1,3}[.)])[ \t]+\S", re.MULTILINE)
 # A contents-page entry: dot leaders running to a page number.
 _CONTENTS_ENTRY = re.compile(r"(?:\.\s?|…){3,}\s*\d+\s*$")
+_CONTENTS_TITLE = re.compile(
+    r"^\s*(?:table\s+of\s+contents|contents|arrangement\s+of\s+"
+    r"(?:articles|sections|clauses|regulations|rules|paragraphs|orders))\s*$",
+    re.IGNORECASE,
+)
 _ENDS_SENTENCE = re.compile(r"[.!?:;][\"'”’)\]]*\s*$")
 _CONTENT = ("paragraph", "list_item")
 # A heading's own number: "5", "5.0", "5.3.1", with or without a trailing dot.
@@ -26,6 +31,14 @@ def _depth(number: str) -> int:
     while len(parts) > 1 and parts[-1] == "0":
         parts.pop()
     return len(parts)
+
+
+def _entry_key(line: str) -> str:
+    """A heading as it reads in both a contents list and the body: no number, leaders or page."""
+
+    text = re.sub(r"^\s*\d{1,3}[A-Za-z]?\s*[.)—–-]+\s*", "", line)
+    text = re.sub(r"(?:[.…]\s?){2,}\s*\d*\s*$", "", text)
+    return " ".join(text.lower().split()).strip(" .:;—–-")
 
 
 @runtime_checkable
@@ -53,7 +66,7 @@ def clean(parsed: ParsedDocument, cleaners: Iterable[Cleaner] | None = None) -> 
 def default_cleaners() -> list[Cleaner]:
     """Page furniture first, so later steps see only real content."""
 
-    return [MarkPageFurniture(), SplitNumberedClauses(), LinkAcrossPages()]
+    return [MarkPageFurniture(), MarkContents(), SplitNumberedClauses(), LinkAcrossPages()]
 
 
 def _trimmed(text: str, start: int, end: int) -> tuple[int, int]:
@@ -161,6 +174,151 @@ class MarkPageFurniture:
         if not spans:
             return None
         return spans[0] if top else spans[-1]
+
+
+class MarkContents:
+    """Reclassify a table of contents so it is not chunked or searched as content.
+
+    Two patterns are recognised, both line by line:
+
+    - a run of entries with dot leaders running to a page number;
+    - a titled list ("Contents", "Arrangement of Sections") whose first entry
+      appears again later as a heading: everything from the title up to that
+      second appearance is the contents.
+
+    A contents list repeats every heading in the document, so left in place it
+    competes with the provisions themselves in search. The text is kept; the
+    spans become ``contents`` elements.
+    """
+
+    name = "mark-contents"
+
+    def __init__(self, *, min_entries: int = 3, max_share: float = 0.25) -> None:
+        self.min_entries = min_entries
+        self.max_share = max_share
+
+    def clean(self, parsed: ParsedDocument) -> ParsedDocument:
+        # Every nonblank line of content, in reading order: (element, start, end).
+        lines: list[tuple[Element, int, int]] = []
+        for element in parsed.elements:
+            if element.kind not in _CONTENT:
+                continue
+            offset = element.start
+            for line in parsed.text_of(element).splitlines(keepends=True):
+                if line.strip():
+                    lines.append((element, *_trimmed(parsed.text, offset, offset + len(line))))
+                offset += len(line)
+        if not lines:
+            return parsed
+        texts = [parsed.text[start:end] for _, start, end in lines]
+        marked = [False] * len(lines)
+        for first, last in (*self._leader_runs(texts), *self._titled_lists(texts, lines, parsed)):
+            for index in range(first, last):
+                marked[index] = True
+        if not any(marked):
+            return parsed
+
+        replacements: dict[str, list[Element]] = {}
+        index = 0
+        while index < len(lines):
+            element = lines[index][0]
+            stop = index
+            while stop < len(lines) and lines[stop][0] is element:
+                stop += 1
+            if any(marked[index:stop]):
+                replacements[element.id] = self._split(element, lines[index:stop], marked[index:stop])
+            index = stop
+        return _rebuild(parsed, replacements)
+
+    def _leader_runs(self, texts: list[str]) -> list[tuple[int, int]]:
+        """Runs of dot-leader entries; a wrapped title or a bare part heading may sit inside."""
+
+        runs, index = [], 0
+        entries = [bool(_CONTENTS_ENTRY.search(text)) for text in texts]
+        while index < len(texts):
+            if not entries[index]:
+                index += 1
+                continue
+            last, count, cursor = index, 1, index + 1
+            while cursor < len(texts) and cursor - last <= 3:
+                if entries[cursor]:
+                    last, count = cursor, count + 1
+                cursor += 1
+            if count >= self.min_entries:
+                first = index
+                while first > 0 and index - first < 2 and _CONTENTS_TITLE.match(texts[first - 1]):
+                    first -= 1
+                if first > 0 and _CONTENTS_TITLE.match(texts[first - 1]):
+                    first -= 1
+                runs.append((first, last + 1))
+            index = last + 1
+        return runs
+
+    def _titled_lists(
+        self, texts: list[str], lines: list[tuple[Element, int, int]], parsed: ParsedDocument
+    ) -> list[tuple[int, int]]:
+        found = []
+        keys = [_entry_key(text) for text in texts]
+        for title, text in enumerate(texts):
+            if not _CONTENTS_TITLE.match(text):
+                continue
+            for entry in range(title + 1, min(title + 4, len(texts))):
+                if len(keys[entry]) < 4:
+                    continue
+                again = next(
+                    (
+                        later
+                        for later in range(title + 1 + self.min_entries, len(texts))
+                        if keys[later] == keys[entry]
+                    ),
+                    None,
+                )
+                if again is None:
+                    continue
+                length = lines[again][1] - lines[title][1]
+                listed = texts[title + 1 : again]
+                # A list of headings: short lines, and a modest part of the document.
+                if length <= self.max_share * len(parsed.text) and all(
+                    len(item) <= 200 for item in listed
+                ):
+                    found.append((title, again))
+                break
+        return found
+
+    @staticmethod
+    def _split(
+        element: Element, lines: list[tuple[Element, int, int]], marked: list[bool]
+    ) -> list[Element]:
+        pieces: list[Element] = []
+        index = 0
+        while index < len(lines):
+            stop = index
+            while stop < len(lines) and marked[stop] == marked[index]:
+                stop += 1
+            start, end = lines[index][1], lines[stop - 1][2]
+            if marked[index]:
+                pieces.append(
+                    replace(
+                        element,
+                        id=f"{element.id}-contents-{len(pieces)}",
+                        kind="contents",
+                        start=start,
+                        end=end,
+                        quality_flags=(*element.quality_flags, "contents_heuristic"),
+                    )
+                )
+            else:
+                kept = any(piece.id == element.id for piece in pieces)
+                pieces.append(
+                    replace(
+                        element,
+                        id=f"{element.id}-part-{len(pieces)}" if kept else element.id,
+                        start=start,
+                        end=end,
+                    )
+                )
+            index = stop
+        return pieces
 
 
 class SplitNumberedClauses:

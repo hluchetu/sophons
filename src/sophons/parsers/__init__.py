@@ -3,6 +3,7 @@ from sophons.parsers.blob import Blob, guess_mime_type
 from sophons.parsers.cleaners import (
     Cleaner,
     LinkAcrossPages,
+    MarkContents,
     MarkPageFurniture,
     SplitNumberedClauses,
     clean,
@@ -26,6 +27,7 @@ __all__ = [
     "Element",
     "InvalidParsedDocument",
     "LinkAcrossPages",
+    "MarkContents",
     "MarkPageFurniture",
     "MarkdownParser",
     "OCRParser",

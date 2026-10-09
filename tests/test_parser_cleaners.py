@@ -163,3 +163,59 @@ def test_cleaners_run_in_the_order_given_and_each_result_is_checked():
     with pytest.raises(InvalidParsedDocument):
         clean(pdf(PAGE_ONE), [Breaks()])
     assert clean(pdf(PAGE_ONE), []) == pdf(PAGE_ONE)
+
+
+CONTENTS_PAGE = (
+    "Employment Act\nContents\n"
+    "Part 1 – PRELIMINARY ...................................................  1\n"
+    "1. Short title ............................................................ 1\n"
+    "2. Interpretation ......................................................... 1\n"
+    "47. Complaint of summary dismissal and unfair\n"
+    "termination ............................................................... 30"
+)
+BODY_PAGE = "EMPLOYMENT ACT\n1. Short title\nThis Act may be cited as the Employment Act."
+
+
+def test_dot_leader_contents_are_marked_and_the_rest_is_kept():
+    from sophons.parsers import MarkContents
+
+    parsed = clean(pdf(CONTENTS_PAGE, BODY_PAGE), [MarkContents()])
+    contents = [e for e in parsed.elements if e.kind == "contents"]
+    assert len(contents) == 1
+    assert parsed.text_of(contents[0]).startswith("Contents\nPart 1")
+    assert parsed.text_of(contents[0]).rstrip().endswith("30")
+    assert "contents_heuristic" in contents[0].quality_flags
+    kept = [parsed.text_of(e) for e in parsed.elements if e.kind == "paragraph"]
+    assert kept == ["Employment Act", BODY_PAGE]
+    assert "Short title ...." not in " ".join(e.content for e in StructureAwareSplitter().split_parsed(parsed))
+
+
+def test_titled_arrangement_ends_where_its_first_entry_appears_again():
+    from sophons.parsers import MarkContents
+
+    arrangement = (
+        "THE CONSTITUTION\nARRANGEMENT OF ARTICLES\nPREAMBLE\nCHAPTER ONE—SOVEREIGNTY\n"
+        "1—Sovereignty of the people.\n2—Supremacy of this Constitution."
+    )
+    more = "CHAPTER TWO—THE REPUBLIC\n4—Declaration of the Republic.\n5—Territory of Kenya."
+    # A contents list is a small part of a document; a tiny body would not look like one.
+    body = "PREAMBLE\nWe, the people of Kenya, adopt this Constitution.\n" + (
+        "All sovereign power belongs to the people and is exercised under this Constitution.\n" * 12
+    ).rstrip()
+    parsed = clean(pdf(arrangement, more, body), [MarkContents()])
+    contents = [parsed.text_of(e) for e in parsed.elements if e.kind == "contents"]
+    assert contents[0].startswith("ARRANGEMENT OF ARTICLES") and contents[-1] == more
+    kept = [parsed.text_of(e) for e in parsed.elements if e.kind == "paragraph"]
+    assert kept == ["THE CONSTITUTION", body]
+
+
+def test_contents_need_a_pattern_not_just_a_word_or_a_few_dots():
+    from sophons.parsers import MarkContents
+
+    lease = pdf(
+        "TENANCY AGREEMENT\nContents\nThe contents of the house are listed in the schedule.",
+        "Signed ............ 2025\nWitness ........... 1",
+        PAGE_TWO,
+    )
+    assert clean(lease, [MarkContents()]) == lease
+    assert MarkContents in [type(cleaner) for cleaner in default_cleaners()]
