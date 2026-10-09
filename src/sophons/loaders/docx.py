@@ -6,6 +6,7 @@ from xml.etree import ElementTree
 from zipfile import ZipFile
 
 from sophons.documents import Document
+from sophons.parsers import Blob, ParsedDocument, ParserRegistry, default_registry
 
 
 class DocxLoader:
@@ -40,6 +41,11 @@ class DocxLoader:
 
     def lazy_load(self):
         yield from self.load()
+
+    def parse(self, registry: ParserRegistry | None = None) -> ParsedDocument:
+        """The same file as a structured document: text plus typed elements."""
+        blob = Blob.from_path(self.path, metadata=self.metadata)
+        return (registry or default_registry()).parse(blob)
 
     def _read_docx_text(self) -> str:
         with ZipFile(self.path) as archive:

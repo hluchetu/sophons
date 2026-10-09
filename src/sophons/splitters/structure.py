@@ -4,6 +4,7 @@ from collections.abc import Iterable
 
 from sophons.documents import Document
 from sophons.parsers import DocumentBlock, StructureParser, TextStructureParser
+from sophons.parsers.elements import Element, ParsedDocument
 
 
 class StructureAwareSplitter:
@@ -69,5 +70,63 @@ class StructureAwareSplitter:
                             size > self.max_chunk_size):
                 emit()
             pending.append(block)
+        emit()
+        return chunks
+
+    def split_parsed(self, parsed: ParsedDocument, *, id: str | None = None,
+                     metadata: dict | None = None) -> list[Document]:
+        """Pack a parsed document's elements into chunks without re-reading text.
+
+        A chunk never crosses a heading boundary and never cuts an element; a
+        table stays whole. Each chunk records its offsets into ``parsed.text``,
+        so a quotation found in a chunk can be located in the source.
+        """
+        parent_id = id if id is not None else parsed.source
+        base = {key: value for key, value in {
+            'source': parsed.source, 'mime_type': parsed.mime_type, 'parser': parsed.parser,
+            **parsed.metadata, **(metadata or {}),
+        }.items() if value is not None}
+        paths = parsed.heading_paths()
+        chunks: list[Document] = []
+        pending: list[Element] = []
+
+        def emit() -> None:
+            if not pending:
+                return
+            content = '\n\n'.join(parsed.text_of(element).strip() for element in pending)
+            index = len(chunks)
+            start, end = pending[0].start, pending[-1].end
+            pages = parsed.page_indexes(start, end)
+            page_metadata = {}
+            if pages:
+                numbers = [page + 1 for page in pages]
+                page_metadata = {'pages': numbers, 'page': numbers[0],
+                                 'start_page': numbers[0], 'end_page': numbers[-1]}
+            flags = sorted({flag for element in pending for flag in element.quality_flags})
+            chunks.append(Document(
+                content=content,
+                id=f'{parent_id}#structure_{index}' if parent_id is not None else None,
+                metadata={**base, **page_metadata, 'parent_id': parent_id,
+                          'chunk_index': index,
+                          'heading_path': list(paths[pending[0].id]),
+                          'block_types': [element.kind for element in pending],
+                          'element_ids': [element.id for element in pending],
+                          'start': start, 'end': end,
+                          'methods': sorted({element.method for element in pending}),
+                          **({'quality_flags': flags} if flags else {}),
+                          'oversized': len(content) > self.max_chunk_size},
+            ))
+            pending.clear()
+
+        for element in parsed.leaves():
+            body = parsed.text_of(element)
+            if not body.strip():
+                continue
+            size = sum(e.end - e.start for e in pending) + 2 * len(pending) + len(body)
+            if pending and (element.kind == 'heading' or
+                            paths[element.id] != paths[pending[0].id] or
+                            size > self.max_chunk_size):
+                emit()
+            pending.append(element)
         emit()
         return chunks

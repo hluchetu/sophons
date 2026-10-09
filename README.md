@@ -270,6 +270,24 @@ Together:
 source -> Loader -> Documents -> Splitter -> Chunks -> Retriever
 ```
 
+To read a file as structured elements instead of flat text, parse it:
+
+```python
+from sophons.parsers import Blob, default_registry
+from sophons.splitters import StructureAwareSplitter
+
+parsed = default_registry().parse(Blob.from_path("contract.docx"))
+for element in parsed.leaves():
+    print(element.kind, parsed.text_of(element)[:60])
+chunks = StructureAwareSplitter(max_chunk_size=1000).split_parsed(parsed)
+```
+
+A parser takes bytes and returns one `ParsedDocument`: the extracted text plus
+typed elements (headings, paragraphs, list items, tables with rows and cells)
+recorded as offsets into that text. Built-in parsers cover plain text, Markdown,
+PDF text layers (`sophons[pdf]`) and Word. Chunks keep their offsets, pages and
+heading path, so a quotation can be traced to its place in the source.
+
 For structure-aware PDFs, install `sophons[pdf-structure]` and use:
 
 ```python

@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from sophons.documents import Document
+from sophons.parsers import Blob, ParsedDocument, ParserRegistry, default_registry
 from sophons.errors import MissingDependencyError
 
 
@@ -57,3 +58,8 @@ class PDFLoader:
 
     def lazy_load(self):
         yield from self.load()
+
+    def parse(self, registry: ParserRegistry | None = None) -> ParsedDocument:
+        """The same file as a structured document: text plus typed elements."""
+        blob = Blob.from_path(self.path, metadata=self.metadata)
+        return (registry or default_registry()).parse(blob)

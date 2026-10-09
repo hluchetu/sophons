@@ -6,6 +6,7 @@ from typing import Any
 from sophons.documents import Document
 from sophons.errors import UnsupportedFileTypeError
 from sophons.loaders.base import Loader
+from sophons.parsers import Blob, ParsedDocument, ParserRegistry, default_registry
 from sophons.loaders.docx import DocxLoader
 from sophons.loaders.pdf import PDFLoader
 from sophons.loaders.text import TextLoader
@@ -45,6 +46,11 @@ class FileLoader:
 
     def lazy_load(self):
         yield from self._loader.lazy_load()
+
+    def parse(self, registry: ParserRegistry | None = None) -> ParsedDocument:
+        """The file as a structured document, with the parser chosen by its type."""
+        blob = Blob.from_path(self.path, metadata=self.metadata)
+        return (registry or default_registry()).parse(blob)
 
     def _select_loader(self) -> Loader:
         suffix = self.path.suffix.lower()
