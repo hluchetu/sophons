@@ -93,7 +93,14 @@ class StructureAwareSplitter:
         def emit() -> None:
             if not pending:
                 return
-            content = '\n\n'.join(parsed.text_of(element).strip() for element in pending)
+            previous_id = None
+            # A sentence cut by a page break is rejoined; other elements stay apart.
+            content = ''
+            for element in pending:
+                body = parsed.text_of(element).strip()
+                joined = bool(content) and element.metadata.get('continued_from') == previous_id
+                content += (' ' if joined else '\n\n' if content else '') + body
+                previous_id = element.id
             index = len(chunks)
             start, end = pending[0].start, pending[-1].end
             pages = parsed.page_indexes(start, end)
@@ -123,9 +130,10 @@ class StructureAwareSplitter:
             if not body.strip():
                 continue
             size = sum(e.end - e.start for e in pending) + 2 * len(pending) + len(body)
-            if pending and (element.kind == 'heading' or
-                            paths[element.id] != paths[pending[0].id] or
-                            size > self.max_chunk_size):
+            continues = bool(pending) and element.metadata.get('continued_from') == pending[-1].id
+            if pending and not continues and (element.kind == 'heading' or
+                                              paths[element.id] != paths[pending[0].id] or
+                                              size > self.max_chunk_size):
                 emit()
             pending.append(element)
         emit()

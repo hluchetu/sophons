@@ -130,11 +130,12 @@ class ParsedDocument:
     def children(self, element_id: str) -> list[Element]:
         return [element for element in self.elements if element.parent_id == element_id]
 
-    def leaves(self) -> list[Element]:
+    def leaves(self, *, include_furniture: bool = False) -> list[Element]:
         """Content-bearing units for chunking, in reading order.
 
         A table is one unit (its rows and cells stay available for lookup), and
-        pages are containers, not content.
+        pages are containers, not content. Page headers and footers are left out
+        unless asked for.
         """
 
         tables = {element.id for element in self.elements if element.kind == "table"}
@@ -146,6 +147,8 @@ class ParsedDocument:
         units = []
         for element in self.elements:
             if element.kind == "page" or element.kind == "row":
+                continue
+            if element.kind in ("header", "footer") and not include_furniture:
                 continue
             if element.kind == "cell" and element.parent_id in rows:
                 continue

@@ -1,5 +1,13 @@
 from sophons.parsers.base import Parser, ParserDeclined, ParserRegistry
 from sophons.parsers.blob import Blob, guess_mime_type
+from sophons.parsers.cleaners import (
+    Cleaner,
+    LinkAcrossPages,
+    MarkPageFurniture,
+    SplitNumberedClauses,
+    clean,
+    default_cleaners,
+)
 from sophons.parsers.docx import DocxParser
 from sophons.parsers.elements import Element, InvalidParsedDocument, ParsedDocument
 from sophons.parsers.pdf import PyPDFParser, page_document
@@ -9,10 +17,13 @@ from sophons.parsers.text import MarkdownParser, PlainTextParser
 
 __all__ = [
     "Blob",
+    "Cleaner",
     "DocumentBlock",
     "DocxParser",
     "Element",
     "InvalidParsedDocument",
+    "LinkAcrossPages",
+    "MarkPageFurniture",
     "MarkdownParser",
     "ParsedDocument",
     "Parser",
@@ -20,8 +31,11 @@ __all__ = [
     "ParserRegistry",
     "PlainTextParser",
     "PyPDFParser",
+    "SplitNumberedClauses",
     "StructureParser",
     "TextStructureParser",
+    "clean",
+    "default_cleaners",
     "default_registry",
     "guess_mime_type",
     "page_document",
