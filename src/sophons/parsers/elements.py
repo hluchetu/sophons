@@ -8,8 +8,22 @@ from sophons.documents import Document
 # Kinds a parser may emit. Containers hold other elements; the rest are leaves.
 CONTAINER_KINDS = frozenset({"page", "table", "row"})
 ELEMENT_KINDS = CONTAINER_KINDS | frozenset(
-    {"heading", "paragraph", "list_item", "cell", "code", "header", "footer", "caption", "footnote"}
+    {
+        "heading",
+        "paragraph",
+        "list_item",
+        "cell",
+        "code",
+        "header",
+        "footer",
+        "contents",
+        "caption",
+        "footnote",
+    }
 )
+# Kept in the text and addressable, but not content to chunk or render:
+# running headers and footers, and a table of contents.
+FURNITURE_KINDS = frozenset({"header", "footer", "contents"})
 
 
 class InvalidParsedDocument(ValueError):
@@ -134,11 +148,11 @@ class ParsedDocument:
         """Content-bearing units for chunking, in reading order.
 
         A table is one unit (its rows and cells stay available for lookup), and
-        pages are containers, not content. Page headers and footers are left out
-        unless asked for.
+        pages are containers, not content. Page headers, footers and a table of
+        contents are left out unless asked for.
         """
 
-        tables = {element.id for element in self.elements if element.kind == "table"}
+        tables = {element.id for element in self.elements if element.kind in ("table", "contents")}
         rows = {
             element.id
             for element in self.elements
@@ -148,7 +162,7 @@ class ParsedDocument:
         for element in self.elements:
             if element.kind == "page" or element.kind == "row":
                 continue
-            if element.kind in ("header", "footer") and not include_furniture:
+            if element.kind in FURNITURE_KINDS and not include_furniture:
                 continue
             if element.kind == "cell" and element.parent_id in rows:
                 continue

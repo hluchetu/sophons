@@ -8,6 +8,7 @@ from sophons.parsers.cleaners import (
     clean,
     default_cleaners,
 )
+from sophons.parsers.docling import DoclingParser
 from sophons.parsers.docx import DocxParser
 from sophons.parsers.elements import Element, InvalidParsedDocument, ParsedDocument
 from sophons.parsers.ocr import OCRParser
@@ -19,6 +20,7 @@ from sophons.parsers.text import MarkdownParser, PlainTextParser
 __all__ = [
     "Blob",
     "Cleaner",
+    "DoclingParser",
     "DocumentBlock",
     "DocxParser",
     "Element",

@@ -288,6 +288,13 @@ recorded as offsets into that text. Built-in parsers cover plain text, Markdown,
 PDF text layers (`sophons[pdf]`) and Word. Chunks keep their offsets, pages and
 heading path, so a quotation can be traced to its place in the source.
 
+Scanned PDFs and images are read with `sophons[ocr]` (Tesseract). For layout
+analysis that finds unnumbered headings, lists and tables, install
+`sophons[docling]` and use `default_registry(layout=True)`. Either way,
+`clean(parsed)` then removes page numbers and running headers from the content,
+separates numbered clauses, sets heading depth from numbering and rejoins
+sentences split by a page break, without altering the extracted text.
+
 For structure-aware PDFs, install `sophons[pdf-structure]` and use:
 
 ```python

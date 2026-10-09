@@ -15,6 +15,17 @@ _CLAUSE = re.compile(r"^[ \t]*(\d{1,3}(?:\.\d{1,3})+\.?|\d{1,3}[.)])[ \t]+\S", r
 _CONTENTS_ENTRY = re.compile(r"(?:\.\s?|…){3,}\s*\d+\s*$")
 _ENDS_SENTENCE = re.compile(r"[.!?:;][\"'”’)\]]*\s*$")
 _CONTENT = ("paragraph", "list_item")
+# A heading's own number: "5", "5.0", "5.3.1", with or without a trailing dot.
+_HEADING_NUMBER = re.compile(r"^\s*(\d{1,3}(?:\.\d{1,3})*)[.)]?\s+\S")
+
+
+def _depth(number: str) -> int:
+    """Outline depth of a clause number: 5 and 5.0 are 1, 5.3 is 2, 5.3.1 is 3."""
+
+    parts = number.split(".")
+    while len(parts) > 1 and parts[-1] == "0":
+        parts.pop()
+    return len(parts)
 
 
 @runtime_checkable
@@ -169,8 +180,33 @@ class SplitNumberedClauses:
 
     def clean(self, parsed: ParsedDocument) -> ParsedDocument:
         replacements: dict[str, list[Element]] = {}
+        outline = 0  # depth of the numbered section currently open, 0 before any
         for element in parsed.elements:
-            if element.kind != "paragraph":
+            if element.kind == "heading":
+                # A heading another parser found: take its depth from its number.
+                number = _HEADING_NUMBER.match(parsed.text_of(element))
+                if number:
+                    label = number.group(1)
+                    outline = _depth(label)
+                    replacements[element.id] = [
+                        replace(
+                            element,
+                            level=outline,
+                            metadata={**element.metadata, "number": label},
+                        )
+                    ]
+                elif outline:
+                    # An unnumbered heading inside a numbered outline sits under the
+                    # open section; left at its own level it would close that section.
+                    replacements[element.id] = [
+                        replace(
+                            element,
+                            level=outline + 1,
+                            quality_flags=(*element.quality_flags, "heading_level_heuristic"),
+                        )
+                    ]
+                continue
+            if element.kind not in _CONTENT:
                 continue
             body = parsed.text_of(element)
             starts = [match.start() for match in _CLAUSE.finditer(body)]
@@ -197,7 +233,7 @@ class SplitNumberedClauses:
                     piece = replace(
                         piece,
                         kind="heading" if title else piece.kind,
-                        level=label.count(".") + 1 if title else piece.level,
+                        level=_depth(label) if title else piece.level,
                         metadata={**piece.metadata, "number": label},
                         quality_flags=(*piece.quality_flags, "numbered_clause_heuristic"),
                     )
