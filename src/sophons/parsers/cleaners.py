@@ -11,6 +11,8 @@ from sophons.parsers.elements import Element, ParsedDocument
 _PAGE_NUMBER = re.compile(r"^\W*(?:page\s+)?\d{1,4}(?:\s*(?:of|/)\s*\d{1,4})?\W*$", re.IGNORECASE)
 # "7." or "7)" or a dotted number such as "7.2"; a bare number is too often a year or amount.
 _CLAUSE = re.compile(r"^[ \t]*(\d{1,3}(?:\.\d{1,3})+\.?|\d{1,3}[.)])[ \t]+\S", re.MULTILINE)
+# A contents-page entry: dot leaders running to a page number.
+_CONTENTS_ENTRY = re.compile(r"(?:\.\s?|…){3,}\s*\d+\s*$")
 _ENDS_SENTENCE = re.compile(r"[.!?:;][\"'”’)\]]*\s*$")
 _CONTENT = ("paragraph", "list_item")
 
@@ -190,6 +192,7 @@ class SplitNumberedClauses:
                         and "\n" not in text.strip()
                         and len(text) <= self.max_title_length
                         and not re.search(r"[.;,:]\s*$", text)
+                        and not _CONTENTS_ENTRY.search(text)
                     )
                     piece = replace(
                         piece,

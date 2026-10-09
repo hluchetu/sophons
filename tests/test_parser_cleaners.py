@@ -107,6 +107,11 @@ def test_short_numbered_titles_become_headings_and_amounts_are_left_alone():
     ]
     nested = SplitNumberedClauses().clean(pdf("7. Termination\n7.1 Notice\n7.2 Either party may end it."))
     assert [(e.kind, e.level) for e in nested.elements if e.kind == "heading"] == [("heading", 1), ("heading", 2)]
+    contents = SplitNumberedClauses().clean(
+        pdf("1.0 INTRODUCTION……………......…………...10\n2.0 RECRUITMENT . . . . . . 12\n3.0 LEAVE")
+    )
+    # Contents-page entries are numbered lines, but they are not section headings.
+    assert [contents.text_of(e) for e in contents.elements if e.kind == "heading"] == ["3.0 LEAVE"]
     plain = SplitNumberedClauses(promote_titles=False).clean(pdf(text))
     assert not [e for e in plain.elements if e.kind == "heading"]
     untouched = pdf("No numbering here.\n\nJust two paragraphs.")

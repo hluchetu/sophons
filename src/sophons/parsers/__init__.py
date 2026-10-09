@@ -10,6 +10,7 @@ from sophons.parsers.cleaners import (
 )
 from sophons.parsers.docx import DocxParser
 from sophons.parsers.elements import Element, InvalidParsedDocument, ParsedDocument
+from sophons.parsers.ocr import OCRParser
 from sophons.parsers.pdf import PyPDFParser, page_document
 from sophons.parsers.registry import default_registry
 from sophons.parsers.structure import DocumentBlock, StructureParser, TextStructureParser
@@ -25,6 +26,7 @@ __all__ = [
     "LinkAcrossPages",
     "MarkPageFurniture",
     "MarkdownParser",
+    "OCRParser",
     "ParsedDocument",
     "Parser",
     "ParserDeclined",
