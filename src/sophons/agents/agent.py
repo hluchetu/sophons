@@ -4,6 +4,9 @@ import asyncio
 import logging
 import threading
 import uuid
+from collections.abc import AsyncIterator
+from typing import Any
+
 from pydantic import BaseModel
 
 from sophons.agents.conversation import ConversationManager, TokenCounter
@@ -16,6 +19,7 @@ from sophons.agents.hooks import AgentFailed, AgentFinished
 from sophons.agents.retry import RetryStrategy, exponential_backoff
 from sophons.agents.session import InMemorySessionManager, SessionManager
 from sophons.agents.state import RunLimits
+from sophons.agents.streaming import close_sink, open_sink
 from sophons.guardrails import Guardrail, GuardrailChain
 from sophons.guardrails.approval import Approver
 from sophons.memory import MemoryManager
@@ -158,6 +162,57 @@ class Agent:
         if result.success:
             self._hooks.invoke(AgentFinished(result=result, session_id=session_id))
         return result
+
+    async def stream(
+        self,
+        input: str,
+        *,
+        session_id: str | None = None,
+        cancel_signal: threading.Event | None = None,
+    ) -> AsyncIterator[Any]:
+        """
+        Run the agent and yield what happens as it happens.
+
+        Yields, in order of occurrence:
+
+        - model stream events (``TextDelta``, ``ToolCallDelta``, ``UsageUpdate``,
+          ``MessageStop`` and so on) for every model call in the run,
+        - ``BeforeToolCall`` and ``AfterToolCall`` around each tool execution,
+        - finally the ``AgentResult``, the same object ``run`` returns.
+
+        Budgets, deadlines, guardrails and session handling are those of
+        ``run``. Streamed text has not been through output validation: treat it
+        as provisional until the final result arrives. A model without native
+        streaming yields each response as a single delta.
+
+        Stopping iteration early cancels the run.
+        """
+        queue: asyncio.Queue = asyncio.Queue()
+        token = open_sink(queue)
+        try:
+            # The task copies the current context, so it and the threads it starts
+            # publish to this queue and to no other stream's.
+            task = asyncio.ensure_future(
+                self.run(input, session_id=session_id, cancel_signal=cancel_signal)
+            )
+        finally:
+            close_sink(token)
+        try:
+            while True:
+                waiter = asyncio.ensure_future(queue.get())
+                done, _ = await asyncio.wait({waiter, task}, return_when=asyncio.FIRST_COMPLETED)
+                if waiter in done:
+                    yield waiter.result()
+                    continue
+                waiter.cancel()
+                break
+            result = await task
+            while not queue.empty():  # events published just before the run ended
+                yield queue.get_nowait()
+            yield result
+        finally:
+            if not task.done():
+                task.cancel()
 
     def run_sync(
         self,

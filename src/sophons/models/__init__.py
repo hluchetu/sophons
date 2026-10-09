@@ -3,17 +3,52 @@ from __future__ import annotations
 from importlib import import_module
 from typing import Any
 
-from sophons.models.chat import AsyncChatModel, ChatModel
+from sophons.models.chat import (
+    AsyncChatModel,
+    AsyncStreamingChatModel,
+    ChatModel,
+    StreamingChatModel,
+)
 from sophons.models.embeddings import AsyncEmbeddingModel, EmbeddingModel, Vector
 from sophons.models.messages import Message
+from sophons.models.streaming import (
+    MessageComplete,
+    MessageStop,
+    ReasoningDelta,
+    StreamAccumulator,
+    StreamEvent,
+    TextDelta,
+    ToolCallDelta,
+    UsageUpdate,
+    aprocess_stream,
+    collect,
+    events_from_message,
+    process_stream,
+    stream_model,
+)
 
 __all__ = [
     "AsyncChatModel",
     "AsyncEmbeddingModel",
+    "AsyncStreamingChatModel",
     "ChatModel",
     "EmbeddingModel",
     "Message",
+    "MessageComplete",
+    "MessageStop",
+    "ReasoningDelta",
+    "StreamAccumulator",
+    "StreamEvent",
+    "StreamingChatModel",
+    "TextDelta",
+    "ToolCallDelta",
+    "UsageUpdate",
     "Vector",
+    "aprocess_stream",
+    "collect",
+    "events_from_message",
+    "process_stream",
+    "stream_model",
 ]
 
 _LAZY_IMPORTS = {

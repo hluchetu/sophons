@@ -26,6 +26,7 @@ from sophons.agents.hooks import (
     HookEventType,
     HookRegistry,
     MessageAdded,
+    ModelStreamed,
 )
 from sophons.agents.loop import AgentLoop
 from sophons.agents.memory import MemoryConfig, NamespaceResolver
@@ -83,6 +84,7 @@ __all__ = [
     "BeforeToolCall",
     "AfterToolCall",
     "MessageAdded",
+    "ModelStreamed",
     # State
     "RunLimits",
     "RunState",

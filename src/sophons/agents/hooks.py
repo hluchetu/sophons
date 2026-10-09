@@ -54,6 +54,19 @@ class AfterModelCall:
 
 
 @dataclass
+class ModelStreamed:
+    """Fired for each event of a streamed model response.
+
+    The loop streams a model call only while something listens for this event
+    or an ``Agent.stream()`` is consuming the run. Callbacks run on the thread
+    reading the stream, so they must be quick and thread-safe.
+    """
+
+    event: Any
+    step: int
+
+
+@dataclass
 class BeforeToolCall:
     """Fired just before a tool is executed."""
 
@@ -85,6 +98,7 @@ AgentHookEvent: TypeAlias = (
     | AgentFailed
     | BeforeModelCall
     | AfterModelCall
+    | ModelStreamed
     | BeforeToolCall
     | AfterToolCall
     | MessageAdded
@@ -97,6 +111,7 @@ _AGENT_HOOK_EVENT_TYPES = (
     AgentFailed,
     BeforeModelCall,
     AfterModelCall,
+    ModelStreamed,
     BeforeToolCall,
     AfterToolCall,
     MessageAdded,

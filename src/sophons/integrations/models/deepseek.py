@@ -17,8 +17,26 @@ from sophons.errors import (
     is_context_overflow,
 )
 from sophons.integrations.models.adapters.openai_compat import OpenAICompatAdapter
+from collections.abc import Iterator
+
 from sophons.models.messages import Message
+from sophons.models.streaming import (
+    MessageStop,
+    ReasoningDelta,
+    StreamEvent,
+    TextDelta,
+    ToolCallDelta,
+    UsageUpdate,
+)
 from sophons.tools.base import Tool
+
+# OpenAI-format finish reasons to Sophons stop reasons.
+_STOP_REASONS = {
+    "stop": "end_turn",
+    "tool_calls": "tool_use",
+    "length": "max_tokens",
+    "content_filter": "content_filtered",
+}
 
 
 class DeepSeekModel:
@@ -98,6 +116,85 @@ class DeepSeekModel:
 
         return Message(
             role="assistant", content=message.content or "", metadata=metadata
+        )
+
+    def stream(
+        self, messages: list[Message], tools: list[Tool] | None = None
+    ) -> Iterator[StreamEvent]:
+        """The same request as ``invoke``, delivered as stream events.
+
+        A stream that goes silent is ended by the client's read timeout and
+        raised as ``ModelTimeoutError``. Closing the iterator closes the request.
+        """
+        kwargs: dict = dict(
+            model=self.model,
+            messages=self._adapter.serialize_messages(messages),
+            temperature=0,
+            stream=True,
+            stream_options={"include_usage": True},
+        )
+        if self._thinking:
+            kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+        if tools:
+            kwargs["tools"] = self._adapter.serialize_tools(tools)
+        try:
+            chunks = self._client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            raise _translate_error(exc, model=self.model) from exc
+        try:
+            try:
+                yield from _stream_events(chunks, model=self.model)
+            except ModelError:
+                raise
+            except Exception as exc:
+                raise _translate_error(exc, model=self.model) from exc
+        finally:
+            close = getattr(chunks, "close", None)
+            if close is not None:
+                close()
+
+
+def _stream_events(chunks: Any, *, model: str) -> Iterator[StreamEvent]:
+    """Translate OpenAI-format stream chunks into Sophons stream events."""
+
+    stopped = False
+    for chunk in chunks:
+        usage = getattr(chunk, "usage", None)
+        if usage is not None:
+            yield UsageUpdate(
+                input_tokens=getattr(usage, "prompt_tokens", None),
+                output_tokens=getattr(usage, "completion_tokens", None),
+                cache_read_tokens=getattr(usage, "prompt_cache_hit_tokens", None),
+            )
+        choices = getattr(chunk, "choices", None) or []
+        if not choices:
+            continue  # the usage-only chunk that closes the stream
+        choice = choices[0]
+        delta = getattr(choice, "delta", None)
+        if delta is not None:
+            reasoning = getattr(delta, "reasoning_content", None)
+            if reasoning:
+                yield ReasoningDelta(reasoning)
+            content = getattr(delta, "content", None)
+            if content:
+                yield TextDelta(content)
+            for position, call in enumerate(getattr(delta, "tool_calls", None) or []):
+                function = getattr(call, "function", None)
+                index = getattr(call, "index", None)
+                yield ToolCallDelta(
+                    index=index if isinstance(index, int) else position,
+                    tool_use_id=getattr(call, "id", None) or None,
+                    name=getattr(function, "name", None) or None,
+                    arguments=getattr(function, "arguments", None) or "",
+                )
+        finish = getattr(choice, "finish_reason", None)
+        if finish:
+            stopped = True
+            yield MessageStop(_STOP_REASONS.get(finish, finish))
+    if not stopped:
+        raise ModelResponseError(
+            "DeepSeek ended the stream without a finish reason.",
+            details={"provider": "deepseek", "model": model},
         )
 
 

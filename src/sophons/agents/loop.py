@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import time
@@ -28,6 +29,7 @@ from sophons.agents.hooks import (
     BeforeToolCall,
     HookRegistry,
     MessageAdded,
+    ModelStreamed,
 )
 from sophons.agents.responses import (
     AgentMetrics,
@@ -44,6 +46,8 @@ from sophons.guardrails import GuardrailChain, GuardrailContext
 from sophons.guardrails.approval import ApprovalRequest, Approver
 from sophons.models.chat import AsyncChatModel, ChatModel
 from sophons.models.messages import Message
+from sophons.models.streaming import MessageComplete, process_stream, stream_model
+from sophons.agents.streaming import emit as emit_stream_event, is_streaming
 from sophons.observability import _semconv
 from sophons.tools.base import AsyncTool, Tool
 from sophons.agents.output import OutputTool, format_validation_error
@@ -527,12 +531,37 @@ class AgentLoop:
 
     async def _invoke_model_attempt(self, messages: list[Message], control: RunControl) -> Message:
         control.reserve_model_attempt()
-        response = await self._invoke_model(messages)
+        response = await self._invoke_model(messages, control)
         control.check()  # A late result cannot be accepted or used for more work.
         return response
 
-    async def _invoke_model(self, messages: list[Message]) -> Message:
-        """Call the model, supporting both sync and async ChatModel."""
+    def _consume_stream(self, messages: list[Message], step: int,
+                        cancel_signal: threading.Event | None) -> Message:
+        """Read a streamed model response, publishing each event as it arrives."""
+        final = None
+        events = stream_model(self._model, messages, tools=list(self._tools.values()))
+        for event in process_stream(events, cancel_signal=cancel_signal):
+            if isinstance(event, MessageComplete):
+                final = event
+                continue
+            emit_stream_event(event)
+            self._hooks.invoke(ModelStreamed(event=event, step=step))
+        if final is None:  # process_stream always ends with a completion
+            raise TypeError("Model stream ended without a completed message.")
+        return final.message
+
+    async def _invoke_model(self, messages: list[Message], control: RunControl | None = None) -> Message:
+        """Call the model, supporting both sync and async ChatModel.
+
+        The response is streamed only while something is listening: an
+        ``Agent.stream()`` consumer or a ``ModelStreamed`` hook. Otherwise the
+        call is exactly the non-streaming ``invoke`` it has always been.
+        """
+        listening = is_streaming() or self._hooks.has_hooks(ModelStreamed)
+        if listening and not inspect.iscoroutinefunction(getattr(self._model, "invoke", None)):
+            step = control.state.step_count if control is not None else 0
+            signal = control.cancel_signal if control is not None else None
+            return await call_callable(self._consume_stream, messages, step, signal)
         if hasattr(self._model, "invoke"):
             return await call_callable(self._model.invoke, messages, tools=list(self._tools.values()))
         raise TypeError(
@@ -547,7 +576,9 @@ class AgentLoop:
         state: RunState,
     ) -> ToolResult:
         """Look up and execute a tool, returning a ToolResult."""
-        self._hooks.invoke(BeforeToolCall(tool_use=tool_use, step=step))
+        started = BeforeToolCall(tool_use=tool_use, step=step)
+        emit_stream_event(started)
+        self._hooks.invoke(started)
 
         tool_call_start = time.monotonic()
 
@@ -653,14 +684,14 @@ class AgentLoop:
         state.record_tool_call(
             tool_use.name, tool_call_ms, error=tool_result.status == "error"
         )
-        self._hooks.invoke(
-            AfterToolCall(
-                tool_use=tool_use,
-                tool_result=tool_result,
-                step=step,
-                duration_ms=tool_call_ms,
-            )
+        finished = AfterToolCall(
+            tool_use=tool_use,
+            tool_result=tool_result,
+            step=step,
+            duration_ms=tool_call_ms,
         )
+        emit_stream_event(finished)
+        self._hooks.invoke(finished)
         return tool_result
 
     def _build_result(

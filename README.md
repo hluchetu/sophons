@@ -270,6 +270,22 @@ Together:
 source -> Loader -> Documents -> Splitter -> Chunks -> Retriever
 ```
 
+To watch a run as it happens, stream it:
+
+```python
+from sophons.agents import Agent
+from sophons.models import TextDelta
+
+async for event in Agent(model=model, tools=tools).stream("What is 17 plus 25?"):
+    if isinstance(event, TextDelta):
+        print(event.text, end="")
+```
+
+`stream()` yields model events (text, tool-call fragments, usage), tool start
+and finish events, and finally the same result `run()` returns. A model without
+native streaming is delivered as a single piece. Streamed text has not been
+through output validation; treat it as provisional until the result arrives.
+
 To read a file as structured elements instead of flat text, parse it:
 
 ```python
